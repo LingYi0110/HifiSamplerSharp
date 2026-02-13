@@ -1,8 +1,5 @@
 using System.Collections.Concurrent;
-using NWaves.Filters.Fda;
-using TorchSharp;
-using static TorchSharp.torch;
-using static TorchSharp.torch.nn;
+using HifiSampler.Core.Stft;
 
 namespace HifiSampler.Core.Utils;
 
@@ -16,91 +13,63 @@ public sealed class PitchAdjustableMelSpectrogram(
     int nMels = 128,
     bool center = false)
 {
-    private readonly Tensor _melTensor =
-        InitializeMelTensor(FilterBanks.MelBankSlaney(nMels, nFft, sampleRate, fMin, fMax));
+    private readonly int _nFft = nFft;
+    private readonly int _winLength = winLength;
+    private readonly int _hopLength = hopLength;
+    private readonly int _nMels = nMels;
+    private readonly bool _center = center;
+    private readonly int _targetBins = nFft / 2 + 1;
 
-    private readonly ConcurrentDictionary<string, Tensor> _hannWindowCache = new();
-
-    private static Tensor InitializeMelTensor(float[][] melBank)
-    {
-        var rows = melBank.Length;
-        var cols = melBank[0].Length;
-        var flat = new float[rows * cols];
-        for (var i = 0; i < rows; i++)
-        {
-            Array.Copy(melBank[i], 0, flat, i * cols, cols);
-        }
-
-        return tensor(flat, dtype: ScalarType.Float32).reshape(rows, cols);
-    }
+    private readonly float[] _melBank = SlaneyMel.BuildMelFilterBank(nMels, nFft, sampleRate, fMin, fMax);
+    private readonly ConcurrentDictionary<int, float[]> _hannWindowCache = new();
 
     public float[,] Extract(float[] input, float keyShift = 0f, float speed = 1f)
     {
-        using var _ = torch.no_grad();
+        if (input.Length == 0)
+        {
+            return new float[_nMels, 0];
+        }
 
         var factor = MathF.Pow(2f, keyShift / 12f);
-        var nFftNew = Math.Max(16, (int)MathF.Round(nFft * factor));
-        var winLengthNew = Math.Max(16, (int)MathF.Round(winLength * factor));
-        var hopLengthNew = Math.Max(1, (int)MathF.Round(hopLength * speed));
+        var nFftNew = (int)MathF.Round(_nFft * factor);
+        var winLengthNew = (int)MathF.Round(_winLength * factor);
+        var hopLengthNew = (int)MathF.Round(_hopLength * speed);
 
-        using var y = tensor(input, dtype: ScalarType.Float32).unsqueeze(0);
         var padLeft = (winLengthNew - hopLengthNew) / 2;
         var padRight = (winLengthNew - hopLengthNew + 1) / 2;
-        using var yPad = functional.pad(y.unsqueeze(1), (padLeft, padRight), PaddingModes.Reflect).squeeze(1);
+        var yPad = StftEngine.ReflectPad(input, padLeft, padRight);
+        var window = _hannWindowCache.GetOrAdd(winLengthNew, StftEngine.BuildHannWindow);
 
-        var key = $"{keyShift:F3}";
-        if (!_hannWindowCache.TryGetValue(key, out var hann))
-        {
-            hann = torch.hann_window(winLengthNew, dtype: ScalarType.Float32);
-            _hannWindowCache[key] = hann;
-        }
-
-        using var spec0 = torch.stft(
-            yPad,
-            n_fft: nFftNew,
-            hop_length: hopLengthNew,
-            win_length: winLengthNew,
-            window: hann,
-            center: center,
-            pad_mode: PaddingModes.Reflect,
-            normalized: false,
-            onesided: true,
-            return_complex: true).abs();
-
-        var spec = spec0;
-        if (Math.Abs(keyShift) > 1e-6)
-        {
-            var size = nFft / 2 + 1;
-            var resize = (int)spec.shape[1];
-            if (resize < size)
-            {
-                spec = functional.pad(spec, (0, 0, 0, size - resize));
-            }
-
-            var idx = torch.arange(size, dtype: ScalarType.Int64);
-            spec = spec.index_select(1, idx);
-            spec *= (float)winLength / winLengthNew;
-        }
-
-        using var mel = torch.matmul(_melTensor, spec).squeeze(0);
-        return TensorTo2D(mel);
+        var spec = StftEngine.Stft(yPad, nFftNew, hopLengthNew, winLengthNew, window, _center);
+        var magnitude = SlaneyMel.Magnitude(spec.Real, spec.Imaginary);
+        var adjusted = AdjustBins(magnitude, spec.Bins, spec.Frames, winLengthNew, keyShift);
+        return SlaneyMel.Multiply(_melBank, _nMels, _targetBins, adjusted, spec.Frames);
     }
 
-    private static float[,] TensorTo2D(Tensor tensor2d)
+    private float[] AdjustBins(
+        float[] source,
+        int sourceBins,
+        int frames,
+        int winLengthNew,
+        float keyShift)
     {
-        var rows = (int)tensor2d.shape[0];
-        var cols = (int)tensor2d.shape[1];
-        var flat = tensor2d.contiguous().cpu().data<float>().ToArray();
-        var result = new float[rows, cols];
-        var idx = 0;
-        for (var r = 0; r < rows; r++)
+        if (sourceBins == _targetBins && MathF.Abs(keyShift) <= 1e-6f)
         {
-            for (var c = 0; c < cols; c++)
-            {
-                result[r, c] = flat[idx++];
-            }
+            return source;
         }
 
-        return result;
+        var target = new float[_targetBins * frames];
+        var copyBins = Math.Min(sourceBins, _targetBins);
+        Parallel.For(0, copyBins, bin =>
+        {
+            Array.Copy(source, bin * frames, target, bin * frames, frames);
+        });
+
+        if (MathF.Abs(keyShift) > 1e-6f)
+        {
+            SlaneyMel.ScaleInPlace(target, (float)_winLength / winLengthNew);
+        }
+
+        return target;
     }
 }

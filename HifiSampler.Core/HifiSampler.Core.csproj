@@ -5,6 +5,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>HifiSampler.Core</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
+    <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDebugInformation>false</GenerateDebugInformation>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,9 +29,6 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.1" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.24.1" />
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="NWaves" Version="0.9.6" />
-    <PackageReference Include="TorchSharp" Version="0.105.2" />
-    <PackageReference Include="TorchSharp-cpu" Version="0.105.2" />
   </ItemGroup>
 
 </Project>

@@ -4,6 +4,20 @@
         <TargetFramework>net10.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
+        <IsAotCompatible>true</IsAotCompatible>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <PublishTrimmed>true</PublishTrimmed>
+        <TrimMode>partial</TrimMode>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+        <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
+        <StripSymbols>true</StripSymbols>
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+        <GenerateDebugInformation>false</GenerateDebugInformation>
+        <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
     </PropertyGroup>
 
     <ItemGroup>
@@ -17,5 +31,23 @@
     <ItemGroup>
       <Compile Remove="ResamplerHostedService.cs" />
     </ItemGroup>
+    
+    <ItemGroup>
+      <None Update="Models\hnsep\model.onnx">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="Models\vocoder\model.onnx">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+
+    <Target Name="RemovePublishSymbols" AfterTargets="Publish">
+        <ItemGroup>
+            <_SymbolFiles Include="$(PublishDir)**\*.pdb;$(PublishDir)**\*.dbg" />
+            <_SymbolDirs Include="$(PublishDir)**\*.dSYM" />
+        </ItemGroup>
+        <Delete Files="@(_SymbolFiles)" />
+        <RemoveDir Directories="@(_SymbolDirs)" />
+    </Target>
 
 </Project>

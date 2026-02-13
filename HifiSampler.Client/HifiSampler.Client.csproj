@@ -5,10 +5,29 @@
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <IsAotCompatible>true</IsAotCompatible>
     </PropertyGroup>
 
-    <ItemGroup>
-      <ProjectReference Include="..\HifiSampler.Core\HifiSampler.Core.csproj" />
-    </ItemGroup>
+    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <PublishTrimmed>true</PublishTrimmed>
+        <TrimMode>partial</TrimMode>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+        <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
+        <StripSymbols>true</StripSymbols>
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+        <GenerateDebugInformation>false</GenerateDebugInformation>
+        <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+    </PropertyGroup>
+
+    <Target Name="RemovePublishSymbols" AfterTargets="Publish">
+        <ItemGroup>
+            <_SymbolFiles Include="$(PublishDir)**\*.pdb;$(PublishDir)**\*.dbg" />
+            <_SymbolDirs Include="$(PublishDir)**\*.dSYM" />
+        </ItemGroup>
+        <Delete Files="@(_SymbolFiles)" />
+        <RemoveDir Directories="@(_SymbolDirs)" />
+    </Target>
 
 </Project>

@@ -4,7 +4,6 @@ using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
-using HifiSampler.Core.Resampler;
 
 namespace HifiSampler.Client;
 
@@ -140,7 +139,10 @@ internal static partial class Program
         {
             try
             {
-                var response = await PostClient.PostAsJsonAsync($"http://127.0.0.1:{TargetPort}/", request);
+                var response = await PostClient.PostAsJsonAsync(
+                    $"http://127.0.0.1:{TargetPort}/",
+                    request,
+                    ClientJsonContext.Default.ResamplerRequest);
                 var body = response.Content is null ? string.Empty : await response.Content.ReadAsStringAsync();
                 if (response.IsSuccessStatusCode)
                 {

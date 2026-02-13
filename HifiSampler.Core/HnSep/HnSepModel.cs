@@ -1,8 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using TorchSharp;
-using static TorchSharp.torch;
-using static TorchSharp.torch.nn;
+using HifiSampler.Core.Stft;
+using HifiSampler.Core.Utils;
 
 namespace HifiSampler.Core.HnSep;
 
@@ -31,62 +30,53 @@ public sealed class HnSepModel : IHnSep, IDisposable
 
         try
         {
-            using var wav = tensor(audio, dtype: ScalarType.Float32).unsqueeze(0);
-            using var window = hann_window(_nFft, dtype: ScalarType.Float32);
-            using var spec = stft(
-                input: wav,
-                n_fft: _nFft,
-                hop_length: _hopLength,
-                win_length: _nFft,
-                window: window,
-                center: true,
-                pad_mode: PaddingModes.Reflect,
-                normalized: false,
-                onesided: true,
-                return_complex: false);
+            var window = StftEngine.BuildHannWindow(_nFft);
+            var spec = StftEngine.Stft(audio, _nFft, _hopLength, _nFft, window, center: true);
+            var f = spec.Bins;
+            var t = spec.Frames;
+            var fftSize = f * t;
 
-            var shape = spec.shape;
-            var f = (int)shape[1];
-            var t = (int)shape[2];
-            var c = (int)shape[3];
-            if (c != 2)
-            {
-                return audio.ToArray();
-            }
-
-            // [1, f, t, 2] -> [1, 2, f, t]
-            using var specInput = spec.permute(0, 3, 1, 2).contiguous().cpu();
-            var inputArray = specInput.data<float>().ToArray();
+            var inputArray = new float[2 * fftSize];
+            Buffer.BlockCopy(spec.Real, 0, inputArray, 0, fftSize * sizeof(float));
+            Buffer.BlockCopy(spec.Imaginary, 0, inputArray, fftSize * sizeof(float), fftSize * sizeof(float));
             var inputTensor = new DenseTensor<float>(inputArray, new[] { 1, 2, f, t });
 
             using var results = _session.Run([NamedOnnxValue.CreateFromTensor("input", inputTensor)]);
             var mask = results.First().AsTensor<float>(); // [1,2,f,t]
 
-            var masked = new DenseTensor<float>(new[] { 1, f, t, 2 });
-            for (var fi = 0; fi < f; fi++)
+            var maskArray = mask.ToArray();
+            if (maskArray.Length < inputArray.Length)
             {
-                for (var ti = 0; ti < t; ti++)
-                {
-                    var real = inputTensor[0, 0, fi, ti];
-                    var imag = inputTensor[0, 1, fi, ti];
-                    var mReal = mask[0, 0, fi, ti];
-                    var mImag = mask[0, 1, fi, ti];
-                    masked[0, fi, ti, 0] = real * mReal - imag * mImag;
-                    masked[0, fi, ti, 1] = real * mImag + imag * mReal;
-                }
+                return audio.ToArray();
             }
 
-            using var specTensor = tensor(masked.Buffer.ToArray(), new long[] { 1, f, t, 2 }, dtype: ScalarType.Float32);
-            using var complex = torch.view_as_complex(specTensor);
-            using var wavPred = istft(
-                input: complex,
-                n_fft: _nFft,
-                hop_length: _hopLength,
-                win_length: _nFft,
-                window: window,
-                center: true);
+            var maskReal = new float[fftSize];
+            var maskImag = new float[fftSize];
+            Buffer.BlockCopy(maskArray, 0, maskReal, 0, fftSize * sizeof(float));
+            Buffer.BlockCopy(maskArray, fftSize * sizeof(float), maskImag, 0, fftSize * sizeof(float));
 
-            var output = wavPred.squeeze(0).cpu().data<float>().ToArray();
+            var maskedReal = new float[fftSize];
+            var maskedImag = new float[fftSize];
+            SlaneyMel.ComplexMultiply(
+                spec.Real,
+                spec.Imaginary,
+                maskReal,
+                maskImag,
+                maskedReal,
+                maskedImag);
+
+            var output = StftEngine.Istft(
+                maskedReal,
+                maskedImag,
+                f,
+                t,
+                _nFft,
+                _hopLength,
+                _nFft,
+                window,
+                center: true,
+                expectedLength: audio.Length);
+
             if (output.Length == audio.Length)
             {
                 return output;

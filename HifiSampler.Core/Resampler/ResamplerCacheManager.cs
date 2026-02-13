@@ -1,12 +1,15 @@
 using System.Security.Cryptography;
 using System.Text;
-using TorchSharp;
-using static TorchSharp.torch;
+using System.Runtime.InteropServices;
 
 namespace HifiSampler.Core.Resampler;
 
 public sealed class ResamplerCacheManager
 {
+    private const uint MelMagic = 0x314C454D; // MEL1
+    private const uint ScaleMagic = 0x314C4353; // SCL1
+    private const uint HnSepMagic = 0x31504E48; // HNP1
+
     public bool ShouldBypassCache(ResamplerFlags flags) => flags.G;
 
     public async Task<(float[,] mel, float scale)?> TryLoadMelAsync(
@@ -23,15 +26,15 @@ public sealed class ResamplerCacheManager
 
         try
         {
-            await using var _ = File.OpenRead(melPath);
             cancellationToken.ThrowIfCancellationRequested();
-            var melTensor = Tensor.Load(melPath);
-            var scaleTensor = Tensor.Load(scalePath);
-            var mel = TensorTo2D(melTensor);
-            var scale = scaleTensor.cpu().data<float>().FirstOrDefault(1f);
-            melTensor.Dispose();
-            scaleTensor.Dispose();
-            return (mel, scale);
+            var mel = ReadMel(melPath);
+            var scale = ReadScale(scalePath);
+            if (mel is null || scale is null)
+            {
+                return null;
+            }
+
+            return (mel, scale.Value);
         }
         catch
         {
@@ -52,10 +55,7 @@ public sealed class ResamplerCacheManager
 
         try
         {
-            var tensor = Tensor.Load(hnsepPath);
-            var result = tensor.cpu().data<float>().ToArray();
-            tensor.Dispose();
-            return Task.FromResult<float[]?>(result);
+            return Task.FromResult<float[]?>(ReadHnSep(hnsepPath));
         }
         catch
         {
@@ -74,11 +74,8 @@ public sealed class ResamplerCacheManager
         var scalePath = BuildScaleCacheFilePath(inputFile, flags);
         EnsureDirectory(melPath);
         EnsureDirectory(scalePath);
-
-        using var melTensor = TensorFrom2D(feature.mel);
-        using var scaleTensor = tensor(new[] { feature.scale }, dtype: ScalarType.Float32);
-        melTensor.save(melPath);
-        scaleTensor.save(scalePath);
+        WriteMel(melPath, feature.mel);
+        WriteScale(scalePath, feature.scale);
         return Task.CompletedTask;
     }
 
@@ -90,8 +87,7 @@ public sealed class ResamplerCacheManager
         cancellationToken.ThrowIfCancellationRequested();
         var hnsepPath = BuildHnSepCacheFilePath(inputFile);
         EnsureDirectory(hnsepPath);
-        using var tensor = torch.tensor(hnsep, dtype: ScalarType.Float32);
-        tensor.save(hnsepPath);
+        WriteHnSep(hnsepPath, hnsep);
         return Task.CompletedTask;
     }
 
@@ -100,7 +96,7 @@ public sealed class ResamplerCacheManager
         var cacheDirectory = ResolveCacheDirectory(inputFile);
         var fileStem = Path.GetFileNameWithoutExtension(inputFile);
         var signature = BuildFeatureSignature(flags);
-        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.mel.pt");
+        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.mel.bin");
     }
 
     private string BuildScaleCacheFilePath(string inputFile, ResamplerFlags flags)
@@ -108,14 +104,14 @@ public sealed class ResamplerCacheManager
         var cacheDirectory = ResolveCacheDirectory(inputFile);
         var fileStem = Path.GetFileNameWithoutExtension(inputFile);
         var signature = BuildFeatureSignature(flags);
-        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.scale.pt");
+        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.scale.bin");
     }
 
     private string BuildHnSepCacheFilePath(string inputFile)
     {
         var cacheDirectory = ResolveCacheDirectory(inputFile);
         var fileStem = Path.GetFileNameWithoutExtension(inputFile);
-        return Path.Combine(cacheDirectory, $"{fileStem}.hnsep.pt");
+        return Path.Combine(cacheDirectory, $"{fileStem}.hnsep.bin");
     }
 
     private static string ResolveCacheDirectory(string inputFile)
@@ -142,38 +138,94 @@ public sealed class ResamplerCacheManager
         return Convert.ToHexString(hash.AsSpan(0, 6)).ToLowerInvariant();
     }
 
-    private static Tensor TensorFrom2D(float[,] source)
+    private static float[,]? ReadMel(string path)
     {
-        var rows = source.GetLength(0);
-        var cols = source.GetLength(1);
-        var flat = new float[rows * cols];
-        var idx = 0;
-        for (var r = 0; r < rows; r++)
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        if (reader.ReadUInt32() != MelMagic)
         {
-            for (var c = 0; c < cols; c++)
-            {
-                flat[idx++] = source[r, c];
-            }
+            return null;
         }
 
-        return tensor(flat, dtype: ScalarType.Float32).reshape(rows, cols);
+        var rows = reader.ReadInt32();
+        var cols = reader.ReadInt32();
+        if (rows <= 0 || cols <= 0)
+        {
+            return null;
+        }
+
+        var flat = new float[rows * cols];
+        stream.ReadExactly(MemoryMarshal.AsBytes(flat.AsSpan()));
+
+        var mel = new float[rows, cols];
+        Buffer.BlockCopy(flat, 0, mel, 0, flat.Length * sizeof(float));
+        return mel;
     }
 
-    private static float[,] TensorTo2D(Tensor tensor2d)
+    private static float? ReadScale(string path)
     {
-        var rows = (int)tensor2d.shape[0];
-        var cols = (int)tensor2d.shape[1];
-        var flat = tensor2d.contiguous().cpu().data<float>().ToArray();
-        var result = new float[rows, cols];
-        var idx = 0;
-        for (var r = 0; r < rows; r++)
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        if (reader.ReadUInt32() != ScaleMagic)
         {
-            for (var c = 0; c < cols; c++)
-            {
-                result[r, c] = flat[idx++];
-            }
+            return null;
         }
 
+        return reader.ReadSingle();
+    }
+
+    private static float[]? ReadHnSep(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        if (reader.ReadUInt32() != HnSepMagic)
+        {
+            return null;
+        }
+
+        var length = reader.ReadInt32();
+        if (length <= 0)
+        {
+            return [];
+        }
+
+        var result = new float[length];
+        stream.ReadExactly(MemoryMarshal.AsBytes(result.AsSpan()));
         return result;
+    }
+
+    private static void WriteMel(string path, float[,] mel)
+    {
+        var rows = mel.GetLength(0);
+        var cols = mel.GetLength(1);
+        var flat = new float[rows * cols];
+        Buffer.BlockCopy(mel, 0, flat, 0, flat.Length * sizeof(float));
+
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(MelMagic);
+        writer.Write(rows);
+        writer.Write(cols);
+        writer.Flush();
+        stream.Write(MemoryMarshal.AsBytes(flat.AsSpan()));
+    }
+
+    private static void WriteScale(string path, float scale)
+    {
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(ScaleMagic);
+        writer.Write(scale);
+        writer.Flush();
+    }
+
+    private static void WriteHnSep(string path, ReadOnlySpan<float> values)
+    {
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+        writer.Write(HnSepMagic);
+        writer.Write(values.Length);
+        writer.Flush();
+        stream.Write(MemoryMarshal.AsBytes(values));
     }
 }
