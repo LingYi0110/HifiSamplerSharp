@@ -9,10 +9,11 @@
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <PublishAot>true</PublishAot>
         <PublishTrimmed>true</PublishTrimmed>
-        <TrimMode>partial</TrimMode>
+        <TrimMode>full</TrimMode>
         <InvariantGlobalization>true</InvariantGlobalization>
-        <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+        <IlcOptimizationPreference>Size</IlcOptimizationPreference>
         <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
         <StripSymbols>true</StripSymbols>
         <DebugType>none</DebugType>

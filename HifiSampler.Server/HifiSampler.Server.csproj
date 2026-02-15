@@ -8,10 +8,11 @@
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <PublishAot>true</PublishAot>
         <PublishTrimmed>true</PublishTrimmed>
-        <TrimMode>partial</TrimMode>
+        <TrimMode>full</TrimMode>
         <InvariantGlobalization>true</InvariantGlobalization>
-        <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+        <IlcOptimizationPreference>Size</IlcOptimizationPreference>
         <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
         <StripSymbols>true</StripSymbols>
         <DebugType>none</DebugType>
@@ -39,6 +40,17 @@
       <None Update="Models\vocoder\model.onnx">
         <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       </None>
+      <None Update="Model\Hnsep\model.onnx">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="Model\Vocoder\model.onnx">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+    
+    <ItemGroup>
+      <Folder Include="Models\Hnsep\" />
+      <Folder Include="Models\Vocoder\" />
     </ItemGroup>
 
     <Target Name="RemovePublishSymbols" AfterTargets="Publish">

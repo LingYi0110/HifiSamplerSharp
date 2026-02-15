@@ -8,7 +8,7 @@ public static class Program
 {
     public static void Main(string[] args)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateSlimBuilder(args);
         var samplerPort = int.TryParse(builder.Configuration["Sampler:Port"], out var parsedPort)
             ? parsedPort
             : 8572;

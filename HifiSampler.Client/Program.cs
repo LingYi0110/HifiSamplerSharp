@@ -1,19 +1,14 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
-using System.Net.Sockets;
 using System.Text.RegularExpressions;
-using System.Diagnostics;
 
 namespace HifiSampler.Client;
 
 internal static partial class Program
 {
     private static readonly HttpClient PostClient = new() { Timeout = TimeSpan.FromSeconds(180) };
-    private static readonly Func<HttpClient> CheckClientFactory = () => new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
     private const int TargetPort = 8572;
-    private static readonly string LauncherScriptName = OperatingSystem.IsWindows() ? "start.bat" : "start.sh";
-    private const string ServerStartupMutexName = "Global\\HifiSamplerServerStartupMutex_DCL_8572";
 
     private static async Task Main(string[] args)
     {
@@ -25,109 +20,12 @@ internal static partial class Program
 
         if (!TryBuildRequest(args, out var request, out var parseError) || request is null)
         {
-            Console.Error.WriteLine(parseError);
+            await Console.Error.WriteLineAsync(parseError).ConfigureAwait(false);
             Environment.Exit(1);
             return;
         }
 
-        var proceedToCommunication = false;
-        var errorOccurred = false;
-        var errorMessage = string.Empty;
-
-        if (await IsServerReady(TargetPort))
-        {
-            proceedToCommunication = true;
-        }
-        else
-        {
-            using var mutex = new Mutex(false, ServerStartupMutexName);
-            var mutexAcquired = false;
-            var mutexOwned = false;
-            try
-            {
-                try
-                {
-                    mutexAcquired = mutex.WaitOne(TimeSpan.FromSeconds(5));
-                    mutexOwned = mutexAcquired;
-                }
-                catch (AbandonedMutexException)
-                {
-                    mutexAcquired = true;
-                    mutexOwned = true;
-                }
-
-                if (mutexAcquired)
-                {
-                    if (await IsServerReady(TargetPort))
-                    {
-                        proceedToCommunication = true;
-                    }
-                    else if (!IsPortInUse(TargetPort))
-                    {
-                        var exeDir = AppContext.BaseDirectory;
-                        var scriptPath = Path.Combine(exeDir, LauncherScriptName);
-                        if (!File.Exists(scriptPath))
-                        {
-                            errorMessage = $"Error: {LauncherScriptName} not found at '{scriptPath}'.";
-                            errorOccurred = true;
-                        }
-                        else
-                        {
-                            LaunchServerLauncher(scriptPath);
-                            if (await WaitForServerToStart(TargetPort, 60))
-                            {
-                                proceedToCommunication = true;
-                            }
-                            else
-                            {
-                                errorMessage = "Server launched by this instance did not become ready.";
-                                errorOccurred = true;
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                errorMessage = ex.Message;
-                errorOccurred = true;
-            }
-            finally
-            {
-                if (mutexOwned)
-                {
-                    try
-                    {
-                        mutex.ReleaseMutex();
-                    }
-                    catch
-                    {
-                        // no-op
-                    }
-                }
-            }
-        }
-
-        if (errorOccurred)
-        {
-            Console.Error.WriteLine(errorMessage);
-            Environment.Exit(1);
-            return;
-        }
-
-        if (!proceedToCommunication)
-        {
-            proceedToCommunication = await WaitForServerToStart(TargetPort, 95);
-        }
-
-        if (!proceedToCommunication)
-        {
-            Console.Error.WriteLine("Server failed readiness check.");
-            Environment.Exit(1);
-            return;
-        }
-
-        await CommunicateWithServer(request);
+        await CommunicateWithServer(request).ConfigureAwait(false);
     }
 
     private static async Task CommunicateWithServer(ResamplerRequest request)
@@ -143,7 +41,7 @@ internal static partial class Program
                     $"http://127.0.0.1:{TargetPort}/",
                     request,
                     ClientJsonContext.Default.ResamplerRequest);
-                var body = response.Content is null ? string.Empty : await response.Content.ReadAsStringAsync();
+                var body = await response.Content.ReadAsStringAsync();
                 if (response.IsSuccessStatusCode)
                 {
                     Console.WriteLine(body);
@@ -158,7 +56,7 @@ internal static partial class Program
                     continue;
                 }
 
-                Console.Error.WriteLine(body);
+                await Console.Error.WriteLineAsync(body).ConfigureAwait(false);
                 Environment.Exit(1);
                 return;
             }
@@ -170,147 +68,11 @@ internal static partial class Program
                     continue;
                 }
 
-                Console.Error.WriteLine(ex.Message);
+                await Console.Error.WriteLineAsync(ex.Message).ConfigureAwait(false);
                 Environment.Exit(1);
                 return;
             }
         }
-    }
-
-    private static async Task<bool> IsServerReady(int port)
-    {
-        HttpClient? checkClient = null;
-        try
-        {
-            checkClient = CheckClientFactory();
-            var response = await checkClient.GetAsync($"http://127.0.0.1:{port}/");
-            return response.StatusCode == HttpStatusCode.OK;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            checkClient?.Dispose();
-        }
-    }
-
-    private static async Task<bool> WaitForServerToStart(int port, int timeoutSeconds)
-    {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-        while (!cts.IsCancellationRequested)
-        {
-            if (await IsServerReady(port))
-            {
-                return true;
-            }
-
-            try
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool IsPortInUse(int port)
-    {
-        const int timeoutMs = 150;
-        Socket? socket = null;
-        try
-        {
-            socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            var result = socket.BeginConnect("127.0.0.1", port, null, null);
-            var success = result.AsyncWaitHandle.WaitOne(timeoutMs);
-            if (!success)
-            {
-                return false;
-            }
-
-            socket.EndConnect(result);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            socket?.Close();
-            socket?.Dispose();
-        }
-    }
-
-    private static void LaunchServerLauncher(string launcherScriptPath)
-    {
-        var workingDir = Path.GetDirectoryName(launcherScriptPath) ?? ".";
-        if (OperatingSystem.IsWindows())
-        {
-            var arguments =
-                $"/C start \"HifiSampler Server\" /D \"{workingDir}\" cmd /C \"title HifiSampler Server & \"{launcherScriptPath}\"\"";
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = arguments,
-                WorkingDirectory = workingDir,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            });
-            return;
-        }
-
-        var scriptCmd = $"\\\"{launcherScriptPath}\\\"";
-        var bashCmd = $"bash -c '{scriptCmd}'";
-        var terminals = new[]
-        {
-            new { Name = "gnome-terminal", Arg = "--", Cmd = bashCmd },
-            new { Name = "konsole", Arg = "-e", Cmd = bashCmd },
-            new { Name = "xfce4-terminal", Arg = "--command", Cmd = bashCmd },
-            new { Name = "mate-terminal", Arg = "-e", Cmd = bashCmd },
-            new { Name = "terminator", Arg = "-e", Cmd = bashCmd },
-            new { Name = "lxterminal", Arg = "-e", Cmd = bashCmd },
-            new { Name = "xterm", Arg = "-e", Cmd = bashCmd }
-        };
-
-        foreach (var term in terminals)
-        {
-            try
-            {
-                using var check = Process.Start(new ProcessStartInfo("which", term.Name)
-                {
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                });
-                check?.WaitForExit(500);
-                if (check?.ExitCode != 0)
-                {
-                    continue;
-                }
-
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = term.Name,
-                    Arguments = $"{term.Arg} {term.Cmd}",
-                    WorkingDirectory = workingDir,
-                    UseShellExecute = true,
-                    CreateNoWindow = false
-                });
-                return;
-            }
-            catch
-            {
-                // try next terminal
-            }
-        }
-
-        throw new NotSupportedException("Could not find supported graphical terminal.");
     }
 
     private static bool TryBuildRequest(string[] args, out ResamplerRequest? request, out string error)
