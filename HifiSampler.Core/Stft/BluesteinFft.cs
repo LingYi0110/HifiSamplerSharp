@@ -1,9 +1,16 @@
 using System.Collections.Concurrent;
+using System.Numerics;
 
 namespace HifiSampler.Core.Stft;
 
 internal static class BluesteinFft
 {
+    private sealed class WorkBuffer(int convolutionLength)
+    {
+        public float[] Real { get; } = new float[convolutionLength];
+        public float[] Imag { get; } = new float[convolutionLength];
+    }
+
     private sealed class BluesteinPlan(
         int length,
         int convolutionLength,
@@ -12,7 +19,8 @@ internal static class BluesteinFft
         float[] forwardKernelReal,
         float[] forwardKernelImag,
         float[] inverseKernelReal,
-        float[] inverseKernelImag)
+        float[] inverseKernelImag,
+        ConcurrentBag<WorkBuffer> workspaces)
     {
         public int Length { get; } = length;
         public int ConvolutionLength { get; } = convolutionLength;
@@ -22,6 +30,7 @@ internal static class BluesteinFft
         public float[] ForwardKernelImag { get; } = forwardKernelImag;
         public float[] InverseKernelReal { get; } = inverseKernelReal;
         public float[] InverseKernelImag { get; } = inverseKernelImag;
+        public ConcurrentBag<WorkBuffer> Workspaces { get; } = workspaces;
     }
 
     private static readonly ConcurrentDictionary<int, BluesteinPlan> PlanCache = new();
@@ -41,71 +50,58 @@ internal static class BluesteinFft
 
         var plan = PlanCache.GetOrAdd(n, CreatePlan);
         var m = plan.ConvolutionLength;
+        if (!plan.Workspaces.TryTake(out var workspace))
+        {
+            workspace = new WorkBuffer(m);
+        }
 
-        var workReal = new float[m];
-        var workImag = new float[m];
+        var workReal = workspace.Real;
+        var workImag = workspace.Imag;
         var chirpCos = plan.ChirpCos;
         var chirpSin = plan.ChirpSin;
 
-        for (var i = 0; i < n; i++)
+        try
         {
-            var r = real[i];
-            var im = imag[i];
-            var cos = chirpCos[i];
-            var sin = chirpSin[i];
-
             if (inverse)
             {
                 // Multiply by exp(+i * pi * i^2 / n).
-                workReal[i] = r * cos - im * sin;
-                workImag[i] = r * sin + im * cos;
+                ApplyInputChirpInverse(real, imag, chirpCos, chirpSin, workReal, workImag, n);
             }
             else
             {
                 // Multiply by exp(-i * pi * i^2 / n).
-                workReal[i] = r * cos + im * sin;
-                workImag[i] = im * cos - r * sin;
+                ApplyInputChirpForward(real, imag, chirpCos, chirpSin, workReal, workImag, n);
             }
-        }
 
-        Radix2Fft.Transform(workReal, workImag, inverse: false);
+            var tailLength = m - n;
+            if (tailLength > 0)
+            {
+                Array.Clear(workReal, n, tailLength);
+                Array.Clear(workImag, n, tailLength);
+            }
 
-        var kernelReal = inverse ? plan.InverseKernelReal : plan.ForwardKernelReal;
-        var kernelImag = inverse ? plan.InverseKernelImag : plan.ForwardKernelImag;
-        for (var i = 0; i < m; i++)
-        {
-            var rr = workReal[i];
-            var ii = workImag[i];
-            var kr = kernelReal[i];
-            var ki = kernelImag[i];
-            workReal[i] = rr * kr - ii * ki;
-            workImag[i] = rr * ki + ii * kr;
-        }
+            Radix2Fft.Transform(workReal, workImag, inverse: false);
 
-        Radix2Fft.Transform(workReal, workImag, inverse: true);
+            var kernelReal = inverse ? plan.InverseKernelReal : plan.ForwardKernelReal;
+            var kernelImag = inverse ? plan.InverseKernelImag : plan.ForwardKernelImag;
+            MultiplySpectrumByKernel(workReal, workImag, kernelReal, kernelImag, m);
 
-        var invN = 1f / n;
-        for (var i = 0; i < n; i++)
-        {
-            var rr = workReal[i];
-            var ii = workImag[i];
-            var cos = chirpCos[i];
-            var sin = chirpSin[i];
+            Radix2Fft.Transform(workReal, workImag, inverse: true);
 
             if (inverse)
             {
-                // Multiply by exp(+i * pi * i^2 / n).
-                var outReal = rr * cos - ii * sin;
-                var outImag = rr * sin + ii * cos;
-                real[i] = outReal * invN;
-                imag[i] = outImag * invN;
+                // Multiply by exp(+i * pi * i^2 / n), and apply 1/n scaling.
+                ApplyOutputChirpInverse(workReal, workImag, chirpCos, chirpSin, real, imag, n, 1f / n);
             }
             else
             {
                 // Multiply by exp(-i * pi * i^2 / n).
-                real[i] = rr * cos + ii * sin;
-                imag[i] = ii * cos - rr * sin;
+                ApplyOutputChirpForward(workReal, workImag, chirpCos, chirpSin, real, imag, n);
             }
+        }
+        finally
+        {
+            plan.Workspaces.Add(workspace);
         }
     }
 
@@ -158,7 +154,171 @@ internal static class BluesteinFft
             forwardKernelReal,
             forwardKernelImag,
             inverseKernelReal,
-            inverseKernelImag);
+            inverseKernelImag,
+            new ConcurrentBag<WorkBuffer>());
+    }
+
+    private static void ApplyInputChirpForward(
+        float[] inputReal,
+        float[] inputImag,
+        float[] chirpCos,
+        float[] chirpSin,
+        float[] workReal,
+        float[] workImag,
+        int count)
+    {
+        var simd = Vector<float>.Count;
+        var i = 0;
+        for (; i <= count - simd; i += simd)
+        {
+            var r = new Vector<float>(inputReal, i);
+            var im = new Vector<float>(inputImag, i);
+            var cos = new Vector<float>(chirpCos, i);
+            var sin = new Vector<float>(chirpSin, i);
+            (r * cos + im * sin).CopyTo(workReal, i);
+            (im * cos - r * sin).CopyTo(workImag, i);
+        }
+
+        for (; i < count; i++)
+        {
+            var r = inputReal[i];
+            var im = inputImag[i];
+            var cos = chirpCos[i];
+            var sin = chirpSin[i];
+            workReal[i] = r * cos + im * sin;
+            workImag[i] = im * cos - r * sin;
+        }
+    }
+
+    private static void ApplyInputChirpInverse(
+        float[] inputReal,
+        float[] inputImag,
+        float[] chirpCos,
+        float[] chirpSin,
+        float[] workReal,
+        float[] workImag,
+        int count)
+    {
+        var simd = Vector<float>.Count;
+        var i = 0;
+        for (; i <= count - simd; i += simd)
+        {
+            var r = new Vector<float>(inputReal, i);
+            var im = new Vector<float>(inputImag, i);
+            var cos = new Vector<float>(chirpCos, i);
+            var sin = new Vector<float>(chirpSin, i);
+            (r * cos - im * sin).CopyTo(workReal, i);
+            (r * sin + im * cos).CopyTo(workImag, i);
+        }
+
+        for (; i < count; i++)
+        {
+            var r = inputReal[i];
+            var im = inputImag[i];
+            var cos = chirpCos[i];
+            var sin = chirpSin[i];
+            workReal[i] = r * cos - im * sin;
+            workImag[i] = r * sin + im * cos;
+        }
+    }
+
+    private static void MultiplySpectrumByKernel(
+        float[] workReal,
+        float[] workImag,
+        float[] kernelReal,
+        float[] kernelImag,
+        int count)
+    {
+        var simd = Vector<float>.Count;
+        var i = 0;
+        for (; i <= count - simd; i += simd)
+        {
+            var rr = new Vector<float>(workReal, i);
+            var ii = new Vector<float>(workImag, i);
+            var kr = new Vector<float>(kernelReal, i);
+            var ki = new Vector<float>(kernelImag, i);
+
+            var outReal = rr * kr - ii * ki;
+            var outImag = rr * ki + ii * kr;
+            outReal.CopyTo(workReal, i);
+            outImag.CopyTo(workImag, i);
+        }
+
+        for (; i < count; i++)
+        {
+            var rr = workReal[i];
+            var ii = workImag[i];
+            var kr = kernelReal[i];
+            var ki = kernelImag[i];
+            workReal[i] = rr * kr - ii * ki;
+            workImag[i] = rr * ki + ii * kr;
+        }
+    }
+
+    private static void ApplyOutputChirpForward(
+        float[] workReal,
+        float[] workImag,
+        float[] chirpCos,
+        float[] chirpSin,
+        float[] outputReal,
+        float[] outputImag,
+        int count)
+    {
+        var simd = Vector<float>.Count;
+        var i = 0;
+        for (; i <= count - simd; i += simd)
+        {
+            var rr = new Vector<float>(workReal, i);
+            var ii = new Vector<float>(workImag, i);
+            var cos = new Vector<float>(chirpCos, i);
+            var sin = new Vector<float>(chirpSin, i);
+            (rr * cos + ii * sin).CopyTo(outputReal, i);
+            (ii * cos - rr * sin).CopyTo(outputImag, i);
+        }
+
+        for (; i < count; i++)
+        {
+            var rr = workReal[i];
+            var ii = workImag[i];
+            var cos = chirpCos[i];
+            var sin = chirpSin[i];
+            outputReal[i] = rr * cos + ii * sin;
+            outputImag[i] = ii * cos - rr * sin;
+        }
+    }
+
+    private static void ApplyOutputChirpInverse(
+        float[] workReal,
+        float[] workImag,
+        float[] chirpCos,
+        float[] chirpSin,
+        float[] outputReal,
+        float[] outputImag,
+        int count,
+        float scale)
+    {
+        var simd = Vector<float>.Count;
+        var scaleVec = new Vector<float>(scale);
+        var i = 0;
+        for (; i <= count - simd; i += simd)
+        {
+            var rr = new Vector<float>(workReal, i);
+            var ii = new Vector<float>(workImag, i);
+            var cos = new Vector<float>(chirpCos, i);
+            var sin = new Vector<float>(chirpSin, i);
+            ((rr * cos - ii * sin) * scaleVec).CopyTo(outputReal, i);
+            ((rr * sin + ii * cos) * scaleVec).CopyTo(outputImag, i);
+        }
+
+        for (; i < count; i++)
+        {
+            var rr = workReal[i];
+            var ii = workImag[i];
+            var cos = chirpCos[i];
+            var sin = chirpSin[i];
+            outputReal[i] = (rr * cos - ii * sin) * scale;
+            outputImag[i] = (rr * sin + ii * cos) * scale;
+        }
     }
 
     private static int NextPowerOfTwo(int value)
