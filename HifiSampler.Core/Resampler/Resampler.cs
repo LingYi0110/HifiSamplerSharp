@@ -1,5 +1,6 @@
 using HifiSampler.Core.Audio;
 using HifiSampler.Core.Pipeline;
+using HifiSampler.Core.Utils;
 using HifiSampler.Core.Vocoder;
 
 namespace HifiSampler.Core.Resampler;
@@ -40,7 +41,7 @@ public sealed class Resampler(
             var thopOrigin = (double)config.OriginHopSize / config.SampleRate;
             var thop = (double)config.HopSize / config.SampleRate;
 
-            var tAreaOrigin = BuildTimeAxis(melOrigin.GetLength(1), thopOrigin);
+            var tAreaOrigin = BuildTimeAxis(melOrigin.Cols, thopOrigin);
             var totalTime = tAreaOrigin[^1] + thopOrigin / 2;
 
             var vel = Math.Pow(2, 1 - velocity / 100.0);
@@ -84,7 +85,7 @@ public sealed class Resampler(
             var newEnd = (lengthReq + con * vel) - cutLeftMelFrames * thop;
 
             var melRender = InterpolateMelOverTime(melOrigin, tAreaOrigin, stretchTMel);
-            var t = Enumerable.Range(0, melRender.GetLength(1)).Select(i => i * thop).ToArray();
+            var t = Enumerable.Range(0, melRender.Cols).Select(i => i * thop).ToArray();
 
             var f0Render = PitchCurve.Build(pitchMidi, pitchBendCents, flags, tempo, newStart, t)
                 .Select(static x => (float)x)
@@ -164,8 +165,8 @@ public sealed class Resampler(
         return t;
     }
 
-    private static (float[,] mel, double[] tAreaOrigin, double stretchLength) BuildLoopedMel(
-        float[,] melOrigin,
+    private static (FloatMatrix mel, double[] tAreaOrigin, double stretchLength) BuildLoopedMel(
+        FloatMatrix melOrigin,
         double[] tAreaOrigin,
         double con,
         double end,
@@ -174,8 +175,8 @@ public sealed class Resampler(
     {
         var left = (int)((con + thopOrigin / 2) / thopOrigin);
         var right = Math.Max(left + 1, (int)((end + thopOrigin / 2) / thopOrigin));
-        left = Math.Clamp(left, 0, melOrigin.GetLength(1) - 1);
-        right = Math.Clamp(right, left + 1, melOrigin.GetLength(1));
+        left = Math.Clamp(left, 0, melOrigin.Cols - 1);
+        right = Math.Clamp(right, left + 1, melOrigin.Cols);
 
         var loop = SliceMel(melOrigin, left, right);
         var padLoopSize = (int)(lengthReq / thopOrigin) + 1;
@@ -183,38 +184,29 @@ public sealed class Resampler(
 
         var prefix = SliceMel(melOrigin, 0, left);
         var merged = ConcatMel(prefix, padded);
-        var newT = BuildTimeAxis(merged.GetLength(1), thopOrigin);
+        var newT = BuildTimeAxis(merged.Cols, thopOrigin);
         return (merged, newT, padLoopSize * thopOrigin);
     }
 
-    private static float[,] SliceMel(float[,] mel, int start, int end)
+    private static FloatMatrix SliceMel(FloatMatrix mel, int start, int end)
     {
-        var rows = mel.GetLength(0);
-        var cols = Math.Max(0, end - start);
-        var result = new float[rows, cols];
-        for (var r = 0; r < rows; r++)
-        {
-            for (var c = 0; c < cols; c++)
-            {
-                result[r, c] = mel[r, start + c];
-            }
-        }
-
-        return result;
+        return mel.SliceColumns(start, end);
     }
 
-    private static float[,] ReflectPadMel(float[,] mel, int padRight)
+    private static FloatMatrix ReflectPadMel(FloatMatrix mel, int padRight)
     {
-        var rows = mel.GetLength(0);
-        var cols = mel.GetLength(1);
+        var rows = mel.Rows;
+        var cols = mel.Cols;
         var outCols = cols + Math.Max(0, padRight);
-        var result = new float[rows, outCols];
+        var result = new FloatMatrix(rows, outCols);
 
         for (var r = 0; r < rows; r++)
         {
+            var src = mel.RowSpan(r);
+            var dst = result.RowSpan(r);
             for (var c = 0; c < cols; c++)
             {
-                result[r, c] = mel[r, c];
+                dst[c] = src[c];
             }
 
             for (var c = cols; c < outCols; c++)
@@ -227,53 +219,38 @@ public sealed class Resampler(
                     pos = cols - 1 - pos;
                 }
 
-                result[r, c] = mel[r, pos];
+                dst[c] = src[pos];
             }
         }
 
         return result;
     }
 
-    private static float[,] ConcatMel(float[,] left, float[,] right)
+    private static FloatMatrix ConcatMel(FloatMatrix left, FloatMatrix right)
     {
-        var rows = left.GetLength(0);
-        var colsL = left.GetLength(1);
-        var colsR = right.GetLength(1);
-        var result = new float[rows, colsL + colsR];
-        for (var r = 0; r < rows; r++)
-        {
-            for (var c = 0; c < colsL; c++)
-            {
-                result[r, c] = left[r, c];
-            }
-
-            for (var c = 0; c < colsR; c++)
-            {
-                result[r, colsL + c] = right[r, c];
-            }
-        }
-
-        return result;
+        return FloatMatrix.ConcatColumns(left, right);
     }
 
-    private static float[,] InterpolateMelOverTime(float[,] mel, double[] x, double[] targets)
+    private static FloatMatrix InterpolateMelOverTime(FloatMatrix mel, double[] x, double[] targets)
     {
-        var rows = mel.GetLength(0);
+        var rows = mel.Rows;
         var cols = targets.Length;
-        var result = new float[rows, cols];
+        var result = new FloatMatrix(rows, cols);
 
         for (var r = 0; r < rows; r++)
         {
             var y = new double[x.Length];
+            var src = mel.RowSpan(r);
             for (var c = 0; c < x.Length; c++)
             {
-                y[c] = mel[r, c];
+                y[c] = src[c];
             }
 
             var interp = LinearInterpolate(x, y, targets);
+            var dst = result.RowSpan(r);
             for (var c = 0; c < cols; c++)
             {
-                result[r, c] = (float)interp[c];
+                dst[c] = (float)interp[c];
             }
         }
 

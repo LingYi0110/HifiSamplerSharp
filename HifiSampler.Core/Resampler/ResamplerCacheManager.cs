@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.InteropServices;
+using HifiSampler.Core.Utils;
 
 namespace HifiSampler.Core.Resampler;
 
@@ -12,7 +13,7 @@ public sealed class ResamplerCacheManager
 
     public bool ShouldBypassCache(ResamplerFlags flags) => flags.G;
 
-    public async Task<(float[,] mel, float scale)?> TryLoadMelAsync(
+    public async Task<(FloatMatrix mel, float scale)?> TryLoadMelAsync(
         string inputFile,
         ResamplerFlags flags,
         CancellationToken cancellationToken = default)
@@ -66,7 +67,7 @@ public sealed class ResamplerCacheManager
     public Task SaveMelAsync(
         string inputFile,
         ResamplerFlags flags,
-        (float[,] mel, float scale) feature,
+        (FloatMatrix mel, float scale) feature,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -138,7 +139,7 @@ public sealed class ResamplerCacheManager
         return Convert.ToHexString(hash.AsSpan(0, 6)).ToLowerInvariant();
     }
 
-    private static float[,]? ReadMel(string path)
+    private static FloatMatrix? ReadMel(string path)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
@@ -157,9 +158,7 @@ public sealed class ResamplerCacheManager
         var flat = new float[rows * cols];
         stream.ReadExactly(MemoryMarshal.AsBytes(flat.AsSpan()));
 
-        var mel = new float[rows, cols];
-        Buffer.BlockCopy(flat, 0, mel, 0, flat.Length * sizeof(float));
-        return mel;
+        return FloatMatrix.FromFlat(rows, cols, flat, takeOwnership: true);
     }
 
     private static float? ReadScale(string path)
@@ -194,12 +193,12 @@ public sealed class ResamplerCacheManager
         return result;
     }
 
-    private static void WriteMel(string path, float[,] mel)
+    private static void WriteMel(string path, FloatMatrix mel)
     {
-        var rows = mel.GetLength(0);
-        var cols = mel.GetLength(1);
+        var rows = mel.Rows;
+        var cols = mel.Cols;
         var flat = new float[rows * cols];
-        Buffer.BlockCopy(mel, 0, flat, 0, flat.Length * sizeof(float));
+        mel.CopyTo(flat);
 
         using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);

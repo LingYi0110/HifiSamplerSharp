@@ -16,8 +16,6 @@ public static class OnnxUtils
             throw new ArgumentException("Onnx device cannot be null or empty.");
         }
 
-        OnnxNativeLibraryResolver.EnsureConfigured();
-
         var sessionOptions = new SessionOptions
         {
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,

@@ -1,3 +1,4 @@
+using System.Numerics;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using HifiSampler.Core.Stft;
@@ -17,7 +18,7 @@ public sealed class HnSepModel : IHnSep, IDisposable
         _hopLength = hopLength;
         if (File.Exists(modelPath))
         {
-            _session = Utils.OnnxUtils.CreateSession(modelPath, device, deviceId);
+            _session = OnnxUtils.CreateSession(modelPath, device, deviceId);
         }
     }
 
@@ -57,7 +58,7 @@ public sealed class HnSepModel : IHnSep, IDisposable
 
             var maskedReal = new float[fftSize];
             var maskedImag = new float[fftSize];
-            SlaneyMel.ComplexMultiply(
+            ComplexMultiply(
                 spec.Real,
                 spec.Imaginary,
                 maskReal,
@@ -89,6 +90,47 @@ public sealed class HnSepModel : IHnSep, IDisposable
         catch
         {
             return audio.ToArray();
+        }
+    }
+    
+    private static void ComplexMultiply(
+        float[] inputReal,
+        float[] inputImag,
+        float[] maskReal,
+        float[] maskImag,
+        float[] outputReal,
+        float[] outputImag)
+    {
+        var length = inputReal.Length;
+        if (inputImag.Length != length ||
+            maskReal.Length != length ||
+            maskImag.Length != length ||
+            outputReal.Length != length ||
+            outputImag.Length != length)
+        {
+            throw new ArgumentException("All complex buffers must have the same length.");
+        }
+
+        var simd = Vector<float>.Count;
+        var i = 0;
+        for (; i <= length - simd; i += simd)
+        {
+            var ar = new Vector<float>(inputReal, i);
+            var ai = new Vector<float>(inputImag, i);
+            var br = new Vector<float>(maskReal, i);
+            var bi = new Vector<float>(maskImag, i);
+            (ar * br - ai * bi).CopyTo(outputReal, i);
+            (ar * bi + ai * br).CopyTo(outputImag, i);
+        }
+
+        for (; i < length; i++)
+        {
+            var real = inputReal[i];
+            var imag = inputImag[i];
+            var maskR = maskReal[i];
+            var maskI = maskImag[i];
+            outputReal[i] = real * maskR - imag * maskI;
+            outputImag[i] = real * maskI + imag * maskR;
         }
     }
 

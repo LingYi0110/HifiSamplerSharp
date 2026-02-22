@@ -1,5 +1,6 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using HifiSampler.Core.Utils;
 
 namespace HifiSampler.Core.Vocoder;
 
@@ -19,12 +20,12 @@ public sealed class OnnxVocoder : IVocoder, IDisposable
         }
     }
     
-    public float[] SpecToWav(float[,] mel, float[] f0)
+    public float[] SpecToWav(FloatMatrix mel, float[] f0)
     {
         // Prepare mel tensor
         // [1, time, num_mels]
-        int nMels = mel.GetLength(0);
-        int timeFrames = mel.GetLength(1);
+        int nMels = mel.Rows;
+        int timeFrames = mel.Cols;
         var melTensor = new DenseTensor<float>(new[] { 1, timeFrames, nMels });
         var melSpan = melTensor.Buffer.Span;
         int idx = 0;
