@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 
 namespace HifiSampler.Core.Utils;
 
-public sealed class FloatMatrix
+public struct FloatMatrix
 {
     private const long ElementwiseParallelThreshold = 1_048_576;
 
@@ -238,8 +238,6 @@ public sealed class FloatMatrix
 
     public static FloatMatrix Scale(FloatMatrix source, float factor, bool parallel = false)
     {
-        if (source is null) throw new ArgumentNullException(nameof(source));
-
         var destination = new FloatMatrix(source._rows, source._cols);
         ScaleInto(source, factor, destination, parallel);
         return destination;
@@ -247,7 +245,6 @@ public sealed class FloatMatrix
 
     public static void ScaleInto(FloatMatrix source, float factor, FloatMatrix destination, bool parallel = false)
     {
-        if (source is null) throw new ArgumentNullException(nameof(source));
         ValidateSameShape(source, destination);
 
         int rows = source._rows;
@@ -308,7 +305,6 @@ public sealed class FloatMatrix
 
     public void MultiplyInPlace(FloatMatrix right, bool parallel = false, int? newStride = null)
     {
-        if (right is null) throw new ArgumentNullException(nameof(right));
         if (_cols != right._rows)
         {
             throw new ArgumentException($"Incompatible shapes: this={Rows}x{Cols}, right={right.Rows}x{right.Cols}.");
@@ -362,7 +358,6 @@ public sealed class FloatMatrix
 
     public void TransposeInto(FloatMatrix destination)
     {
-        if (destination is null) throw new ArgumentNullException(nameof(destination));
         if (destination._rows != _cols || destination._cols != _rows)
         {
             throw new ArgumentException($"destination must be {_cols}x{_rows}.");
@@ -454,8 +449,6 @@ public sealed class FloatMatrix
 
     public static FloatMatrix ConcatColumns(FloatMatrix left, FloatMatrix right)
     {
-        if (left is null) throw new ArgumentNullException(nameof(left));
-        if (right is null) throw new ArgumentNullException(nameof(right));
         if (left._rows != right._rows)
         {
             throw new ArgumentException($"Row counts must match: left={left._rows}, right={right._rows}.");
@@ -582,8 +575,6 @@ public sealed class FloatMatrix
 
     private static void ValidateSameShape(FloatMatrix left, FloatMatrix right)
     {
-        if (left is null) throw new ArgumentNullException(nameof(left));
-        if (right is null) throw new ArgumentNullException(nameof(right));
         if (left._rows != right._rows || left._cols != right._cols)
         {
             throw new ArgumentException($"Shape mismatch: left={left._rows}x{left._cols}, right={right._rows}x{right._cols}.");
@@ -592,8 +583,6 @@ public sealed class FloatMatrix
 
     private static void ValidateMulShape(FloatMatrix a, FloatMatrix b)
     {
-        if (a is null) throw new ArgumentNullException(nameof(a));
-        if (b is null) throw new ArgumentNullException(nameof(b));
         if (a._cols != b._rows)
         {
             throw new ArgumentException($"Incompatible shapes: A={a._rows}x{a._cols}, B={b._rows}x{b._cols}.");
@@ -602,7 +591,6 @@ public sealed class FloatMatrix
 
     private static void ValidateMulDestination(FloatMatrix a, FloatMatrix b, FloatMatrix c)
     {
-        if (c is null) throw new ArgumentNullException(nameof(c));
         if (c._rows != a._rows || c._cols != b._cols)
         {
             throw new ArgumentException($"C must be {a._rows}x{b._cols}.");

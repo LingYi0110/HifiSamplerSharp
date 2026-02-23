@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Numerics;
 using HifiSampler.Core.Stft;
 
@@ -17,7 +16,7 @@ public sealed class PitchAdjustableMelSpectrogram(
     private readonly int _targetBins = nFft / 2 + 1;
 
     private readonly FloatMatrix _melBank = SlaneyMel.BuildMelFilterBank(nMels, nFft, sampleRate, fMin, fMax);
-    private readonly ConcurrentDictionary<int, float[]> _hannWindowCache = new();
+    private readonly float[] _window = StftEngine.BuildHannWindow(winLength);
 
     public FloatMatrix Extract(float[] input, float keyShift = 0f, float speed = 1f)
     {
@@ -27,19 +26,16 @@ public sealed class PitchAdjustableMelSpectrogram(
         }
 
         var factor = MathF.Pow(2f, keyShift / 12f);
-        var nFftNew = (int)MathF.Round(nFft * factor);
-        var winLengthNew = (int)MathF.Round(winLength * factor);
         var hopLengthNew = (int)MathF.Round(hopLength * speed);
 
-        var padLeft = (winLengthNew - hopLengthNew) / 2;
-        var padRight = (winLengthNew - hopLengthNew + 1) / 2;
+        var padLeft = (winLength - hopLengthNew) / 2;
+        var padRight = (winLength - hopLengthNew + 1) / 2;
         var yPad = StftEngine.ReflectPad(input, padLeft, padRight);
-        var window = _hannWindowCache.GetOrAdd(winLengthNew, StftEngine.BuildHannWindow);
 
-        var spec = StftEngine.Stft(yPad, nFftNew, hopLengthNew, winLengthNew, window, center);
+        var spec = StftEngine.Stft(yPad, nFft, hopLengthNew, winLength, _window, center);
         var magnitude = Magnitude(spec.Real, spec.Imaginary);
         var magnitudeMatrix = FloatMatrix.FromFlat(spec.Bins, spec.Frames, magnitude, takeOwnership: true);
-        var adjusted = AdjustBins(magnitudeMatrix, winLengthNew, keyShift);
+        var adjusted = AdjustBins(magnitudeMatrix, factor);
         return FloatMatrix.Multiply(_melBank, adjusted, parallel: true);
     }
     private static float[] Magnitude(float[] real, float[] imaginary)
@@ -65,26 +61,41 @@ public sealed class PitchAdjustableMelSpectrogram(
     }
     private FloatMatrix AdjustBins(
         FloatMatrix source,
-        int winLengthNew,
-        float keyShift)
+        float factor)
     {
-        if (source.Rows == _targetBins && MathF.Abs(keyShift) <= 1e-6f)
+        if (source.Rows == _targetBins && MathF.Abs(factor - 1f) <= 1e-6f)
         {
             return source;
         }
 
         var frames = source.Cols;
         var target = new FloatMatrix(_targetBins, frames);
-        var copyBins = Math.Min(source.Rows, _targetBins);
-        Parallel.For(0, copyBins, bin =>
+        var sourceMaxBin = source.Rows - 1;
+        Parallel.For(0, _targetBins, targetBin =>
         {
-            source.RowSpan(bin).CopyTo(target.RowSpan(bin));
-        });
+            var sourceBinPosition = targetBin / factor;
+            if (sourceBinPosition < 0f || sourceBinPosition > sourceMaxBin)
+            {
+                return;
+            }
 
-        if (MathF.Abs(keyShift) > 1e-6f)
-        {
-            target.ScaleInPlace((float)winLength / winLengthNew, parallel: true);
-        }
+            var lowerBin = Math.Clamp((int)sourceBinPosition, 0, sourceMaxBin);
+            var upperBin = Math.Min(lowerBin + 1, sourceMaxBin);
+            var blend = sourceBinPosition - lowerBin;
+            var targetRow = target.RowSpan(targetBin);
+            if (blend <= 1e-6f || upperBin == lowerBin)
+            {
+                source.RowSpan(lowerBin).CopyTo(targetRow);
+                return;
+            }
+
+            var lowerRow = source.RowSpan(lowerBin);
+            var upperRow = source.RowSpan(upperBin);
+            for (var frame = 0; frame < frames; frame++)
+            {
+                targetRow[frame] = lowerRow[frame] + (upperRow[frame] - lowerRow[frame]) * blend;
+            }
+        });
 
         return target;
     }

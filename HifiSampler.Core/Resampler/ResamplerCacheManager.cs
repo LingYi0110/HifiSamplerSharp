@@ -30,12 +30,12 @@ public sealed class ResamplerCacheManager
             cancellationToken.ThrowIfCancellationRequested();
             var mel = ReadMel(melPath);
             var scale = ReadScale(scalePath);
-            if (mel is null || scale is null)
+            if (!mel.HasValue || !scale.HasValue)
             {
                 return null;
             }
 
-            return (mel, scale.Value);
+            return (mel.Value, scale.Value);
         }
         catch
         {
