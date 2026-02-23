@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Numerics;
 
 namespace HifiSampler.Core.Stft;
@@ -10,10 +11,36 @@ internal readonly record struct ComplexSpectrogram(
 
 internal static class StftEngine
 {
-    private sealed class FftFrameBuffer(int fftSize)
+    private const int ParallelFrameThreshold = 32;
+
+    private sealed class PooledFrameBuffer : IDisposable
     {
-        public float[] Real { get; } = new float[fftSize];
-        public float[] Imaginary { get; } = new float[fftSize];
+        private readonly int _fftSize;
+
+        public PooledFrameBuffer(int fftSize)
+        {
+            _fftSize = fftSize;
+            Real = ArrayPool<float>.Shared.Rent(fftSize);
+            Imaginary = ArrayPool<float>.Shared.Rent(fftSize);
+        }
+
+        public float[] Real { get; }
+        public float[] Imaginary { get; }
+
+        public Span<float> RealSpan => Real.AsSpan(0, _fftSize);
+        public Span<float> ImaginarySpan => Imaginary.AsSpan(0, _fftSize);
+
+        public void Clear()
+        {
+            RealSpan.Clear();
+            ImaginarySpan.Clear();
+        }
+
+        public void Dispose()
+        {
+            ArrayPool<float>.Shared.Return(Real);
+            ArrayPool<float>.Shared.Return(Imaginary);
+        }
     }
 
     public static float[] BuildHannWindow(int length)
@@ -42,15 +69,23 @@ internal static class StftEngine
 
     public static float[] ReflectPad(ReadOnlySpan<float> source, int left, int right)
     {
-        if (source.Length == 0)
+        var padLeft = Math.Max(0, left);
+        var padRight = Math.Max(0, right);
+
+        if (padLeft == 0 && padRight == 0)
         {
-            return new float[Math.Max(0, left + right)];
+            return source.ToArray();
         }
 
-        var output = new float[Math.Max(0, left + source.Length + right)];
+        if (source.Length == 0)
+        {
+            return new float[padLeft + padRight];
+        }
+
+        var output = new float[padLeft + source.Length + padRight];
         for (var i = 0; i < output.Length; i++)
         {
-            var sourceIndex = ReflectIndex(i - left, source.Length);
+            var sourceIndex = ReflectIndex(i - padLeft, source.Length);
             output[i] = source[sourceIndex];
         }
 
@@ -65,29 +100,11 @@ internal static class StftEngine
         ReadOnlySpan<float> window,
         bool center)
     {
-        if (nFft < 2)
-        {
-            throw new ArgumentException($"FFT size must be >= 2. Got {nFft}.");
-        }
+        ValidateFftAndWindowArgs(nFft, winLength, window);
 
-        if (winLength < 1)
-        {
-            throw new ArgumentException($"Window length must be >= 1. Got {winLength}.");
-        }
-
-        if (winLength > nFft)
-        {
-            throw new ArgumentException("Window length must be <= FFT size.");
-        }
-
-        if (window.Length < winLength)
-        {
-            throw new ArgumentException("Window buffer is smaller than window length.");
-        }
-
-        var source = center ? ReflectPad(input, nFft / 2, nFft / 2) : input.ToArray();
-        var windowArray = window[..winLength].ToArray();
         var effectiveHop = Math.Max(1, hopLength);
+        var sourceArray = center ? ReflectPad(input, nFft / 2, nFft / 2) : null;
+        var source = sourceArray is null ? input : sourceArray.AsSpan();
         var frameCount = source.Length >= nFft
             ? 1 + (source.Length - nFft) / effectiveHop
             : 1;
@@ -96,35 +113,16 @@ internal static class StftEngine
         var real = new float[bins * frameCount];
         var imag = new float[bins * frameCount];
 
-        Parallel.For(
-            0,
-            frameCount,
-            () => new FftFrameBuffer(nFft),
-            (frame, _, local) =>
-            {
-                var frameStart = frame * effectiveHop;
-                Array.Clear(local.Real, 0, nFft);
-                Array.Clear(local.Imaginary, 0, nFft);
-
-                var available = Math.Max(0, Math.Min(winLength, source.Length - frameStart));
-                if (available > 0)
-                {
-                    MultiplyWindow(source, frameStart, windowArray, local.Real, available);
-                }
-
-                FftDispatcher.Transform(local.Real, local.Imaginary, inverse: false);
-
-                var offset = frame;
-                for (var bin = 0; bin < bins; bin++)
-                {
-                    var dst = bin * frameCount + offset;
-                    real[dst] = local.Real[bin];
-                    imag[dst] = local.Imaginary[bin];
-                }
-
-                return local;
-            },
-            _ => { });
+        if (ShouldUseParallel(frameCount))
+        {
+            var parallelSource = sourceArray ?? input.ToArray();
+            var parallelWindow = window[..winLength].ToArray();
+            ProcessStftParallel(parallelSource, nFft, winLength, effectiveHop, parallelWindow, bins, frameCount, real, imag);
+        }
+        else
+        {
+            ProcessStftSequential(source, nFft, winLength, effectiveHop, window[..winLength], bins, frameCount, real, imag);
+        }
 
         return new ComplexSpectrogram(real, imag, bins, frameCount);
     }
@@ -141,9 +139,154 @@ internal static class StftEngine
         bool center,
         int expectedLength)
     {
+        ValidateIstftArgs(onesidedReal, onesidedImag, bins, frames, nFft, winLength, window);
+
+        var effectiveHop = Math.Max(1, hopLength);
+        var outputLength = nFft + Math.Max(0, frames - 1) * effectiveHop;
+        var output = new float[outputLength];
+        var windowSumSquare = new float[outputLength];
+        var analysisWindow = window[..winLength];
+
+        using var frameBuffer = new PooledFrameBuffer(nFft);
+        var frameReal = frameBuffer.RealSpan;
+        var frameImag = frameBuffer.ImaginarySpan;
+
+        for (var frame = 0; frame < frames; frame++)
+        {
+            frameBuffer.Clear();
+
+            for (var bin = 0; bin < bins; bin++)
+            {
+                var src = bin * frames + frame;
+                frameReal[bin] = onesidedReal[src];
+                frameImag[bin] = onesidedImag[src];
+            }
+
+            for (var bin = bins; bin < nFft; bin++)
+            {
+                var mirrored = nFft - bin;
+                frameReal[bin] = frameReal[mirrored];
+                frameImag[bin] = -frameImag[mirrored];
+            }
+
+            Radix2Fft.Transform(frameReal, frameImag, inverse: true);
+
+            var frameStart = frame * effectiveHop;
+            var copyLength = Math.Max(0, Math.Min(winLength, outputLength - frameStart));
+            for (var i = 0; i < copyLength; i++)
+            {
+                var weight = analysisWindow[i];
+                var position = frameStart + i;
+                output[position] += frameReal[i] * weight;
+                windowSumSquare[position] += weight * weight;
+            }
+        }
+
+        const float epsilon = 1e-8f;
+        for (var i = 0; i < output.Length; i++)
+        {
+            if (windowSumSquare[i] > epsilon)
+            {
+                output[i] /= windowSumSquare[i];
+            }
+        }
+
+        return TrimCentered(output, nFft, center, expectedLength);
+    }
+
+    private static void ProcessStftSequential(
+        ReadOnlySpan<float> source,
+        int nFft,
+        int winLength,
+        int hopLength,
+        ReadOnlySpan<float> window,
+        int bins,
+        int frameCount,
+        float[] outputReal,
+        float[] outputImag)
+    {
+        using var frameBuffer = new PooledFrameBuffer(nFft);
+
+        for (var frame = 0; frame < frameCount; frame++)
+        {
+            frameBuffer.Clear();
+            var frameStart = frame * hopLength;
+            var available = Math.Max(0, Math.Min(winLength, source.Length - frameStart));
+            if (available > 0)
+            {
+                MultiplyWindow(source, frameStart, window, frameBuffer.RealSpan, available);
+            }
+
+            Radix2Fft.Transform(frameBuffer.RealSpan, frameBuffer.ImaginarySpan, inverse: false);
+            StoreSpectrum(frameBuffer.RealSpan, frameBuffer.ImaginarySpan, bins, frameCount, frame, outputReal, outputImag);
+        }
+    }
+
+    private static void ProcessStftParallel(
+        float[] source,
+        int nFft,
+        int winLength,
+        int hopLength,
+        float[] window,
+        int bins,
+        int frameCount,
+        float[] outputReal,
+        float[] outputImag)
+    {
+        Parallel.For(
+            0,
+            frameCount,
+            () => new PooledFrameBuffer(nFft),
+            (frame, _, local) =>
+            {
+                local.Clear();
+                var frameStart = frame * hopLength;
+                var available = Math.Max(0, Math.Min(winLength, source.Length - frameStart));
+                if (available > 0)
+                {
+                    MultiplyWindow(source, frameStart, window, local.RealSpan, available);
+                }
+
+                Radix2Fft.Transform(local.RealSpan, local.ImaginarySpan, inverse: false);
+                StoreSpectrum(local.RealSpan, local.ImaginarySpan, bins, frameCount, frame, outputReal, outputImag);
+                return local;
+            },
+            local => local.Dispose());
+    }
+
+    private static void StoreSpectrum(
+        ReadOnlySpan<float> frameReal,
+        ReadOnlySpan<float> frameImag,
+        int bins,
+        int frameCount,
+        int frame,
+        float[] outputReal,
+        float[] outputImag)
+    {
+        var offset = frame;
+        for (var bin = 0; bin < bins; bin++)
+        {
+            var dst = bin * frameCount + offset;
+            outputReal[dst] = frameReal[bin];
+            outputImag[dst] = frameImag[bin];
+        }
+    }
+
+    private static bool ShouldUseParallel(int frameCount)
+    {
+        return frameCount >= ParallelFrameThreshold && Environment.ProcessorCount > 1;
+    }
+
+    private static void ValidateFftAndWindowArgs(int nFft, int winLength, ReadOnlySpan<float> window)
+    {
         if (nFft < 2)
         {
             throw new ArgumentException($"FFT size must be >= 2. Got {nFft}.");
+        }
+
+        if (!Radix2Fft.IsPowerOfTwo(nFft))
+        {
+            throw new ArgumentException($"FFT size must be power-of-two. Got {nFft}.");
         }
 
         if (winLength < 1)
@@ -160,6 +303,18 @@ internal static class StftEngine
         {
             throw new ArgumentException("Window buffer is smaller than window length.");
         }
+    }
+
+    private static void ValidateIstftArgs(
+        ReadOnlySpan<float> onesidedReal,
+        ReadOnlySpan<float> onesidedImag,
+        int bins,
+        int frames,
+        int nFft,
+        int winLength,
+        ReadOnlySpan<float> window)
+    {
+        ValidateFftAndWindowArgs(nFft, winLength, window);
 
         if (frames < 1)
         {
@@ -177,57 +332,6 @@ internal static class StftEngine
         {
             throw new ArgumentException("One-sided complex buffers are smaller than expected bins*frames.");
         }
-
-        var effectiveHop = Math.Max(1, hopLength);
-        var outputLength = nFft + Math.Max(0, frames - 1) * effectiveHop;
-        var output = new float[outputLength];
-        var windowSumSquare = new float[outputLength];
-
-        var frameReal = new float[nFft];
-        var frameImag = new float[nFft];
-
-        for (var frame = 0; frame < frames; frame++)
-        {
-            Array.Clear(frameReal, 0, nFft);
-            Array.Clear(frameImag, 0, nFft);
-
-            for (var bin = 0; bin < bins; bin++)
-            {
-                var src = bin * frames + frame;
-                frameReal[bin] = onesidedReal[src];
-                frameImag[bin] = onesidedImag[src];
-            }
-
-            for (var bin = bins; bin < nFft; bin++)
-            {
-                var mirrored = nFft - bin;
-                frameReal[bin] = frameReal[mirrored];
-                frameImag[bin] = -frameImag[mirrored];
-            }
-
-            FftDispatcher.Transform(frameReal, frameImag, inverse: true);
-
-            var frameStart = frame * effectiveHop;
-            var copyLength = Math.Max(0, Math.Min(winLength, outputLength - frameStart));
-            for (var i = 0; i < copyLength; i++)
-            {
-                var weight = window[i];
-                var position = frameStart + i;
-                output[position] += frameReal[i] * weight;
-                windowSumSquare[position] += weight * weight;
-            }
-        }
-
-        const float epsilon = 1e-8f;
-        for (var i = 0; i < output.Length; i++)
-        {
-            if (windowSumSquare[i] > epsilon)
-            {
-                output[i] /= windowSumSquare[i];
-            }
-        }
-
-        return TrimCentered(output, nFft, center, expectedLength);
     }
 
     private static float[] TrimCentered(float[] source, int nFft, bool center, int expectedLength)
@@ -270,19 +374,19 @@ internal static class StftEngine
     }
 
     private static void MultiplyWindow(
-        float[] source,
+        ReadOnlySpan<float> source,
         int sourceOffset,
-        float[] window,
-        float[] destination,
+        ReadOnlySpan<float> window,
+        Span<float> destination,
         int count)
     {
         var simd = Vector<float>.Count;
         var i = 0;
         for (; i <= count - simd; i += simd)
         {
-            var s = new Vector<float>(source, sourceOffset + i);
-            var w = new Vector<float>(window, i);
-            (s * w).CopyTo(destination, i);
+            var s = new Vector<float>(source.Slice(sourceOffset + i));
+            var w = new Vector<float>(window.Slice(i));
+            (s * w).CopyTo(destination.Slice(i));
         }
 
         for (; i < count; i++)

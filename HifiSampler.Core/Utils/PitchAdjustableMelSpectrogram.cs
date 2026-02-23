@@ -59,9 +59,7 @@ public sealed class PitchAdjustableMelSpectrogram(
 
         return output;
     }
-    private FloatMatrix AdjustBins(
-        FloatMatrix source,
-        float factor)
+    private FloatMatrix AdjustBins(FloatMatrix source, float factor)
     {
         if (source.Rows == _targetBins && MathF.Abs(factor - 1f) <= 1e-6f)
         {
