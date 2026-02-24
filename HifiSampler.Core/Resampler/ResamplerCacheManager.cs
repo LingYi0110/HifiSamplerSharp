@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.InteropServices;
-using HifiSampler.Core.Utils;
 
 namespace HifiSampler.Core.Resampler;
 
@@ -13,7 +12,7 @@ public sealed class ResamplerCacheManager
 
     public bool ShouldBypassCache(ResamplerFlags flags) => flags.G;
 
-    public async Task<(FloatMatrix mel, float scale)?> TryLoadMelAsync(
+    public async Task<(float[,] mel, float scale)?> TryLoadMelAsync(
         string inputFile,
         ResamplerFlags flags,
         CancellationToken cancellationToken = default)
@@ -30,12 +29,12 @@ public sealed class ResamplerCacheManager
             cancellationToken.ThrowIfCancellationRequested();
             var mel = ReadMel(melPath);
             var scale = ReadScale(scalePath);
-            if (!mel.HasValue || !scale.HasValue)
+            if (mel is null || !scale.HasValue)
             {
                 return null;
             }
 
-            return (mel.Value, scale.Value);
+            return (mel, scale.Value);
         }
         catch
         {
@@ -67,7 +66,7 @@ public sealed class ResamplerCacheManager
     public Task SaveMelAsync(
         string inputFile,
         ResamplerFlags flags,
-        (FloatMatrix mel, float scale) feature,
+        (float[,] mel, float scale) feature,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -139,7 +138,7 @@ public sealed class ResamplerCacheManager
         return Convert.ToHexString(hash.AsSpan(0, 6)).ToLowerInvariant();
     }
 
-    private static FloatMatrix? ReadMel(string path)
+    private static float[,]? ReadMel(string path)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
@@ -157,8 +156,17 @@ public sealed class ResamplerCacheManager
 
         var flat = new float[rows * cols];
         stream.ReadExactly(MemoryMarshal.AsBytes(flat.AsSpan()));
+        var mel = new float[rows, cols];
+        var offset = 0;
+        for (var row = 0; row < rows; row++)
+        {
+            for (var col = 0; col < cols; col++)
+            {
+                mel[row, col] = flat[offset++];
+            }
+        }
 
-        return FloatMatrix.FromFlat(rows, cols, flat, takeOwnership: true);
+        return mel;
     }
 
     private static float? ReadScale(string path)
@@ -193,12 +201,19 @@ public sealed class ResamplerCacheManager
         return result;
     }
 
-    private static void WriteMel(string path, FloatMatrix mel)
+    private static void WriteMel(string path, float[,] mel)
     {
-        var rows = mel.Rows;
-        var cols = mel.Cols;
+        var rows = mel.GetLength(0);
+        var cols = mel.GetLength(1);
         var flat = new float[rows * cols];
-        mel.CopyTo(flat);
+        var offset = 0;
+        for (var row = 0; row < rows; row++)
+        {
+            for (var col = 0; col < cols; col++)
+            {
+                flat[offset++] = mel[row, col];
+            }
+        }
 
         using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);

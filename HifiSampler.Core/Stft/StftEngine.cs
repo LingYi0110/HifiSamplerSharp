@@ -3,12 +3,6 @@ using System.Numerics;
 
 namespace HifiSampler.Core.Stft;
 
-internal readonly record struct ComplexSpectrogram(
-    float[] Real,
-    float[] Imaginary,
-    int Bins,
-    int Frames);
-
 internal static class StftEngine
 {
     private const int ParallelFrameThreshold = 32;
@@ -92,7 +86,7 @@ internal static class StftEngine
         return output;
     }
 
-    public static ComplexSpectrogram Stft(
+    public static Complex[,] Stft(
         ReadOnlySpan<float> input,
         int nFft,
         int hopLength,
@@ -110,28 +104,24 @@ internal static class StftEngine
             : 1;
 
         var bins = nFft / 2 + 1;
-        var real = new float[bins * frameCount];
-        var imag = new float[bins * frameCount];
+        var spectrum = new Complex[bins, frameCount];
 
         if (ShouldUseParallel(frameCount))
         {
             var parallelSource = sourceArray ?? input.ToArray();
             var parallelWindow = window[..winLength].ToArray();
-            ProcessStftParallel(parallelSource, nFft, winLength, effectiveHop, parallelWindow, bins, frameCount, real, imag);
+            ProcessStftParallel(parallelSource, nFft, winLength, effectiveHop, parallelWindow, bins, frameCount, spectrum);
         }
         else
         {
-            ProcessStftSequential(source, nFft, winLength, effectiveHop, window[..winLength], bins, frameCount, real, imag);
+            ProcessStftSequential(source, nFft, winLength, effectiveHop, window[..winLength], bins, frameCount, spectrum);
         }
 
-        return new ComplexSpectrogram(real, imag, bins, frameCount);
+        return spectrum;
     }
 
     public static float[] Istft(
-        ReadOnlySpan<float> onesidedReal,
-        ReadOnlySpan<float> onesidedImag,
-        int bins,
-        int frames,
+        Complex[,] onesidedSpectrum,
         int nFft,
         int hopLength,
         int winLength,
@@ -139,9 +129,11 @@ internal static class StftEngine
         bool center,
         int expectedLength)
     {
-        ValidateIstftArgs(onesidedReal, onesidedImag, bins, frames, nFft, winLength, window);
+        ValidateIstftArgs(onesidedSpectrum, nFft, winLength, window);
 
         var effectiveHop = Math.Max(1, hopLength);
+        var bins = onesidedSpectrum.GetLength(0);
+        var frames = onesidedSpectrum.GetLength(1);
         var outputLength = nFft + Math.Max(0, frames - 1) * effectiveHop;
         var output = new float[outputLength];
         var windowSumSquare = new float[outputLength];
@@ -157,9 +149,9 @@ internal static class StftEngine
 
             for (var bin = 0; bin < bins; bin++)
             {
-                var src = bin * frames + frame;
-                frameReal[bin] = onesidedReal[src];
-                frameImag[bin] = onesidedImag[src];
+                var sample = onesidedSpectrum[bin, frame];
+                frameReal[bin] = (float)sample.Real;
+                frameImag[bin] = (float)sample.Imaginary;
             }
 
             for (var bin = bins; bin < nFft; bin++)
@@ -202,8 +194,7 @@ internal static class StftEngine
         ReadOnlySpan<float> window,
         int bins,
         int frameCount,
-        float[] outputReal,
-        float[] outputImag)
+        Complex[,] outputSpectrum)
     {
         using var frameBuffer = new PooledFrameBuffer(nFft);
 
@@ -218,7 +209,7 @@ internal static class StftEngine
             }
 
             Radix2Fft.Transform(frameBuffer.RealSpan, frameBuffer.ImaginarySpan, inverse: false);
-            StoreSpectrum(frameBuffer.RealSpan, frameBuffer.ImaginarySpan, bins, frameCount, frame, outputReal, outputImag);
+            StoreSpectrum(frameBuffer.RealSpan, frameBuffer.ImaginarySpan, bins, frame, outputSpectrum);
         }
     }
 
@@ -230,8 +221,7 @@ internal static class StftEngine
         float[] window,
         int bins,
         int frameCount,
-        float[] outputReal,
-        float[] outputImag)
+        Complex[,] outputSpectrum)
     {
         Parallel.For(
             0,
@@ -248,7 +238,7 @@ internal static class StftEngine
                 }
 
                 Radix2Fft.Transform(local.RealSpan, local.ImaginarySpan, inverse: false);
-                StoreSpectrum(local.RealSpan, local.ImaginarySpan, bins, frameCount, frame, outputReal, outputImag);
+                StoreSpectrum(local.RealSpan, local.ImaginarySpan, bins, frame, outputSpectrum);
                 return local;
             },
             local => local.Dispose());
@@ -258,17 +248,12 @@ internal static class StftEngine
         ReadOnlySpan<float> frameReal,
         ReadOnlySpan<float> frameImag,
         int bins,
-        int frameCount,
         int frame,
-        float[] outputReal,
-        float[] outputImag)
+        Complex[,] outputSpectrum)
     {
-        var offset = frame;
         for (var bin = 0; bin < bins; bin++)
         {
-            var dst = bin * frameCount + offset;
-            outputReal[dst] = frameReal[bin];
-            outputImag[dst] = frameImag[bin];
+            outputSpectrum[bin, frame] = new Complex(frameReal[bin], frameImag[bin]);
         }
     }
 
@@ -306,16 +291,15 @@ internal static class StftEngine
     }
 
     private static void ValidateIstftArgs(
-        ReadOnlySpan<float> onesidedReal,
-        ReadOnlySpan<float> onesidedImag,
-        int bins,
-        int frames,
+        Complex[,] onesidedSpectrum,
         int nFft,
         int winLength,
         ReadOnlySpan<float> window)
     {
         ValidateFftAndWindowArgs(nFft, winLength, window);
 
+        var bins = onesidedSpectrum.GetLength(0);
+        var frames = onesidedSpectrum.GetLength(1);
         if (frames < 1)
         {
             throw new ArgumentException($"Frame count must be >= 1. Got {frames}.");
@@ -325,12 +309,6 @@ internal static class StftEngine
         if (bins != expectedBins)
         {
             throw new ArgumentException($"Bins do not match FFT size. Expected {expectedBins}, got {bins}.");
-        }
-
-        var expectedValues = bins * frames;
-        if (onesidedReal.Length < expectedValues || onesidedImag.Length < expectedValues)
-        {
-            throw new ArgumentException("One-sided complex buffers are smaller than expected bins*frames.");
         }
     }
 

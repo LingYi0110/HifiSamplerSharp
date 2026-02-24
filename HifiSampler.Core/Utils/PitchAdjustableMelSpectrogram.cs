@@ -15,14 +15,14 @@ public sealed class PitchAdjustableMelSpectrogram(
 {
     private readonly int _targetBins = nFft / 2 + 1;
 
-    private readonly FloatMatrix _melBank = SlaneyMel.BuildMelFilterBank(nMels, nFft, sampleRate, fMin, fMax);
+    private readonly float[,] _slaneyMelBank = SlaneyMel.BuildMelFilterBank(nMels, nFft, sampleRate, fMin, fMax);
     private readonly float[] _window = StftEngine.BuildHannWindow(winLength);
 
-    public FloatMatrix Extract(float[] input, float keyShift = 0f, float speed = 1f)
+    public float[,] Extract(float[] input, float keyShift = 0f, float speed = 1f)
     {
         if (input.Length == 0)
         {
-            return new FloatMatrix(nMels, 0);
+            return new float[nMels, 0];
         }
 
         var factor = MathF.Pow(2f, keyShift / 12f);
@@ -32,43 +32,92 @@ public sealed class PitchAdjustableMelSpectrogram(
         var padRight = (winLength - hopLengthNew + 1) / 2;
         var yPad = StftEngine.ReflectPad(input, padLeft, padRight);
 
-        var spec = StftEngine.Stft(yPad, nFft, hopLengthNew, winLength, _window, center);
-        var magnitude = Magnitude(spec.Real, spec.Imaginary);
-        var magnitudeMatrix = FloatMatrix.FromFlat(spec.Bins, spec.Frames, magnitude, takeOwnership: true);
+        var spectrum = StftEngine.Stft(yPad, nFft, hopLengthNew, winLength, _window, center);
+        var magnitudeMatrix = Magnitude(spectrum);
         var adjusted = AdjustBins(magnitudeMatrix, factor);
-        return FloatMatrix.Multiply(_melBank, adjusted, parallel: true);
+        return ApplyMelFilterBank(_slaneyMelBank, adjusted);
     }
-    private static float[] Magnitude(float[] real, float[] imaginary)
+
+    private static float[,] Magnitude(Complex[,] spectrum)
     {
-        var length = Math.Min(real.Length, imaginary.Length);
-        var output = new float[length];
-
-        var simd = Vector<float>.Count;
-        var i = 0;
-        for (; i <= length - simd; i += simd)
+        var bins = spectrum.GetLength(0);
+        var frames = spectrum.GetLength(1);
+        var output = new float[bins, frames];
+        for (var bin = 0; bin < bins; bin++)
         {
-            var r = new Vector<float>(real, i);
-            var im = new Vector<float>(imaginary, i);
-            Vector.SquareRoot(r * r + im * im).CopyTo(output, i);
-        }
-
-        for (; i < length; i++)
-        {
-            output[i] = MathF.Sqrt(real[i] * real[i] + imaginary[i] * imaginary[i]);
+            for (var frame = 0; frame < frames; frame++)
+            {
+                output[bin, frame] = (float)spectrum[bin, frame].Magnitude;
+            }
         }
 
         return output;
     }
-    private FloatMatrix AdjustBins(FloatMatrix source, float factor)
+
+    private float[,] ApplyMelFilterBank(float[,] filterBank, float[,] input)
     {
-        if (source.Rows == _targetBins && MathF.Abs(factor - 1f) <= 1e-6f)
+        var nMels = filterBank.GetLength(0);
+        var bins = filterBank.GetLength(1);
+        if (input.GetLength(0) != bins)
+        {
+            throw new ArgumentException("Input bin count does not match mel filter bank.");
+        }
+
+        var frames = input.GetLength(1);
+        var output = new float[nMels, frames];
+        Parallel.For(0, nMels, mel =>
+        {
+            var start = -1;
+            var endExclusive = 0;
+            for (var bin = 0; bin < bins; bin++)
+            {
+                if (filterBank[mel, bin] <= 0f)
+                {
+                    continue;
+                }
+
+                if (start < 0)
+                {
+                    start = bin;
+                }
+
+                endExclusive = bin + 1;
+            }
+
+            if (start < 0)
+            {
+                return;
+            }
+
+            for (var bin = start; bin < endExclusive; bin++)
+            {
+                var weight = filterBank[mel, bin];
+                if (weight == 0f)
+                {
+                    continue;
+                }
+
+                for (var frame = 0; frame < frames; frame++)
+                {
+                    output[mel, frame] += weight * input[bin, frame];
+                }
+            }
+        });
+
+        return output;
+    }
+    
+    private float[,] AdjustBins(float[,] source, float factor)
+    {
+        var sourceBins = source.GetLength(0);
+        var frames = source.GetLength(1);
+        if (sourceBins == _targetBins && MathF.Abs(factor - 1f) <= 1e-6f)
         {
             return source;
         }
 
-        var frames = source.Cols;
-        var target = new FloatMatrix(_targetBins, frames);
-        var sourceMaxBin = source.Rows - 1;
+        var target = new float[_targetBins, frames];
+        var sourceMaxBin = sourceBins - 1;
         Parallel.For(0, _targetBins, targetBin =>
         {
             var sourceBinPosition = targetBin / factor;
@@ -80,18 +129,20 @@ public sealed class PitchAdjustableMelSpectrogram(
             var lowerBin = Math.Clamp((int)sourceBinPosition, 0, sourceMaxBin);
             var upperBin = Math.Min(lowerBin + 1, sourceMaxBin);
             var blend = sourceBinPosition - lowerBin;
-            var targetRow = target.RowSpan(targetBin);
             if (blend <= 1e-6f || upperBin == lowerBin)
             {
-                source.RowSpan(lowerBin).CopyTo(targetRow);
+                for (var frame = 0; frame < frames; frame++)
+                {
+                    target[targetBin, frame] = source[lowerBin, frame];
+                }
+
                 return;
             }
 
-            var lowerRow = source.RowSpan(lowerBin);
-            var upperRow = source.RowSpan(upperBin);
             for (var frame = 0; frame < frames; frame++)
             {
-                targetRow[frame] = lowerRow[frame] + (upperRow[frame] - lowerRow[frame]) * blend;
+                var lower = source[lowerBin, frame];
+                target[targetBin, frame] = lower + (source[upperBin, frame] - lower) * blend;
             }
         });
 

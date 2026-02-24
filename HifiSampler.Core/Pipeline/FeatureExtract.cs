@@ -11,7 +11,7 @@ public sealed class FeatureExtract(
     IHnSep hnsep,
     ResamplerConfig config)
 {
-    public async Task<(FloatMatrix mel, float scale)> GetFeatureAsync(
+    public async Task<(float[,] mel, float scale)> GetFeatureAsync(
         string inputFile,
         ResamplerFlags flags,
         CancellationToken cancellationToken)
@@ -32,7 +32,7 @@ public sealed class FeatureExtract(
         return generated;
     }
 
-    private async Task<(FloatMatrix mel, float scale)> GenerateFeatureAsync(
+    private async Task<(float[,] mel, float scale)> GenerateFeatureAsync(
         string inputFile,
         ResamplerFlags flags,
         CancellationToken cancellationToken)
@@ -158,17 +158,16 @@ public sealed class FeatureExtract(
         return result;
     }
 
-    private static void ApplyDynamicRangeCompressionInPlace(FloatMatrix mel)
+    private static void ApplyDynamicRangeCompressionInPlace(float[,] mel)
     {
         const float epsilon = 1e-9f;
-        var rows = mel.Rows;
-        var cols = mel.Cols;
+        var rows = mel.GetLength(0);
+        var cols = mel.GetLength(1);
         for (var r = 0; r < rows; r++)
         {
-            var row = mel.RowSpan(r);
             for (var c = 0; c < cols; c++)
             {
-                row[c] = MathF.Log(MathF.Max(epsilon, row[c]));
+                mel[r, c] = MathF.Log(MathF.Max(epsilon, mel[r, c]));
             }
         }
     }

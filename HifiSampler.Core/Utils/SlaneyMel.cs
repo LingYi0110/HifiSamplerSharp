@@ -4,7 +4,7 @@ namespace HifiSampler.Core.Utils;
 
 internal static class SlaneyMel
 {
-    public static FloatMatrix BuildMelFilterBank(
+    public static float[,] BuildMelFilterBank(
         int nMels,
         int nFft,
         int sampleRate,
@@ -12,7 +12,7 @@ internal static class SlaneyMel
         float fMax)
     {
         var bins = nFft / 2 + 1;
-        var filters = new FloatMatrix(nMels, bins);
+        var filters = new float[nMels, bins];
 
         var clampedFMin = Math.Clamp(fMin, 0f, sampleRate / 2f);
         var clampedFMax = Math.Clamp(fMax, clampedFMin + 1f, sampleRate / 2f);
@@ -71,7 +71,6 @@ internal static class SlaneyMel
 
     private static float HzToMelSlaney(float hz)
     {
-        // librosa/auditory-toolbox style Slaney mel scale
         const float fSp = 200f / 3f;
         const float minLogHz = 1000f;
         const float minLogMel = minLogHz / fSp; // 15

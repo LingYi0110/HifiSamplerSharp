@@ -32,14 +32,29 @@ public sealed class HnSepModel : IHnSep, IDisposable
         try
         {
             var window = StftEngine.BuildHannWindow(_nFft);
-            var spec = StftEngine.Stft(audio, _nFft, _hopLength, _nFft, window, center: true);
-            var f = spec.Bins;
-            var t = spec.Frames;
+            var spectrum = StftEngine.Stft(audio, _nFft, _hopLength, _nFft, window, center: true);
+            var f = spectrum.GetLength(0);
+            var t = spectrum.GetLength(1);
             var fftSize = f * t;
 
             var inputArray = new float[2 * fftSize];
-            Buffer.BlockCopy(spec.Real, 0, inputArray, 0, fftSize * sizeof(float));
-            Buffer.BlockCopy(spec.Imaginary, 0, inputArray, fftSize * sizeof(float), fftSize * sizeof(float));
+            var offset = 0;
+            for (var bin = 0; bin < f; bin++)
+            {
+                for (var frame = 0; frame < t; frame++)
+                {
+                    inputArray[offset++] = (float)spectrum[bin, frame].Real;
+                }
+            }
+
+            for (var bin = 0; bin < f; bin++)
+            {
+                for (var frame = 0; frame < t; frame++)
+                {
+                    inputArray[offset++] = (float)spectrum[bin, frame].Imaginary;
+                }
+            }
+
             var inputTensor = new DenseTensor<float>(inputArray, new[] { 1, 2, f, t });
 
             using var results = _session.Run([NamedOnnxValue.CreateFromTensor("input", inputTensor)]);
@@ -51,26 +66,19 @@ public sealed class HnSepModel : IHnSep, IDisposable
                 return audio.ToArray();
             }
 
-            var maskReal = new float[fftSize];
-            var maskImag = new float[fftSize];
-            Buffer.BlockCopy(maskArray, 0, maskReal, 0, fftSize * sizeof(float));
-            Buffer.BlockCopy(maskArray, fftSize * sizeof(float), maskImag, 0, fftSize * sizeof(float));
-
-            var maskedReal = new float[fftSize];
-            var maskedImag = new float[fftSize];
-            ComplexMultiply(
-                spec.Real,
-                spec.Imaginary,
-                maskReal,
-                maskImag,
-                maskedReal,
-                maskedImag);
+            var maskedSpectrum = new Complex[f, t];
+            for (var bin = 0; bin < f; bin++)
+            {
+                for (var frame = 0; frame < t; frame++)
+                {
+                    var idx = bin * t + frame;
+                    var maskComplex = new Complex(maskArray[idx], maskArray[fftSize + idx]);
+                    maskedSpectrum[bin, frame] = spectrum[bin, frame] * maskComplex;
+                }
+            }
 
             var output = StftEngine.Istft(
-                maskedReal,
-                maskedImag,
-                f,
-                t,
+                maskedSpectrum,
                 _nFft,
                 _hopLength,
                 _nFft,
@@ -90,47 +98,6 @@ public sealed class HnSepModel : IHnSep, IDisposable
         catch
         {
             return audio.ToArray();
-        }
-    }
-    
-    private static void ComplexMultiply(
-        float[] inputReal,
-        float[] inputImag,
-        float[] maskReal,
-        float[] maskImag,
-        float[] outputReal,
-        float[] outputImag)
-    {
-        var length = inputReal.Length;
-        if (inputImag.Length != length ||
-            maskReal.Length != length ||
-            maskImag.Length != length ||
-            outputReal.Length != length ||
-            outputImag.Length != length)
-        {
-            throw new ArgumentException("All complex buffers must have the same length.");
-        }
-
-        var simd = Vector<float>.Count;
-        var i = 0;
-        for (; i <= length - simd; i += simd)
-        {
-            var ar = new Vector<float>(inputReal, i);
-            var ai = new Vector<float>(inputImag, i);
-            var br = new Vector<float>(maskReal, i);
-            var bi = new Vector<float>(maskImag, i);
-            (ar * br - ai * bi).CopyTo(outputReal, i);
-            (ar * bi + ai * br).CopyTo(outputImag, i);
-        }
-
-        for (; i < length; i++)
-        {
-            var real = inputReal[i];
-            var imag = inputImag[i];
-            var maskR = maskReal[i];
-            var maskI = maskImag[i];
-            outputReal[i] = real * maskR - imag * maskI;
-            outputImag[i] = real * maskI + imag * maskR;
         }
     }
 
