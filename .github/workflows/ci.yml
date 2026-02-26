@@ -2,22 +2,39 @@ name: CI
 
 on:
   push:
-    tags:
-      - "v*"
   workflow_dispatch:
 
 jobs:
   publish:
+    name: ${{ matrix.artifact_name }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             rid: win-x64
+            backend: cpu
+            artifact_name: build-windows-cpu
+          - os: windows-latest
+            rid: win-x64
+            backend: cuda
+            artifact_name: build-windows-cuda
+          - os: windows-latest
+            rid: win-x64
+            backend: dml
+            artifact_name: build-windows-dml
           - os: ubuntu-latest
             rid: linux-x64
+            backend: cpu
+            artifact_name: build-linux-cpu
+          - os: ubuntu-latest
+            rid: linux-x64
+            backend: cuda
+            artifact_name: build-linux-cuda
           - os: macos-latest
             rid: osx-arm64
+            backend: cpu
+            artifact_name: build-macos-cpu
 
     runs-on: ${{ matrix.os }}
 
@@ -35,33 +52,39 @@ jobs:
           dotnet publish HifiSampler.Server/HifiSampler.Server.csproj
           -c Release
           -r ${{ matrix.rid }}
-          -o out/server/${{ matrix.rid }}
+          -o out/server
+          -p:OnnxRuntimeBackend=${{ matrix.backend }}
 
       - name: Publish Client
         run: >
           dotnet publish HifiSampler.Client/HifiSampler.Client.csproj
           -c Release
           -r ${{ matrix.rid }}
-          -o out/client/${{ matrix.rid }}
+          -o out/client
+          -p:AssemblyName=HifiSampler
 
-      - name: Pack (Windows)
-        if: runner.os == 'Windows'
+      - name: Pack
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path "out\server\${{ matrix.rid }}\*" -DestinationPath "dist\server-${{ matrix.rid }}.zip"
-          Compress-Archive -Path "out\client\${{ matrix.rid }}\*" -DestinationPath "dist\client-${{ matrix.rid }}.zip"
+          $artifactName = "${{ matrix.artifact_name }}"
+          $packageRoot = "package/$artifactName"
+          New-Item -ItemType Directory -Force -Path "$packageRoot/Client" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$packageRoot/Server" | Out-Null
 
-      - name: Pack (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p dist
-          cd out
-          (cd server/${{ matrix.rid }} && zip -r ../../../dist/server-${{ matrix.rid }}.zip .)
-          (cd client/${{ matrix.rid }} && zip -r ../../../dist/client-${{ matrix.rid }}.zip .)
+          $clientExecutableName = if ("${{ runner.os }}" -eq "Windows") { "HifiSampler.exe" } else { "HifiSampler" }
+          $clientExecutablePath = Join-Path "out/client" $clientExecutableName
+          if (!(Test-Path $clientExecutablePath)) {
+            throw "Client executable not found: $clientExecutablePath"
+          }
+
+          Copy-Item -Path "out/server/*" -Destination "$packageRoot/Server/" -Recurse -Force
+          Copy-Item -Path $clientExecutablePath -Destination "$packageRoot/Client/$clientExecutableName" -Force
+
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Compress-Archive -Path "$packageRoot/*" -DestinationPath "dist/$artifactName.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.rid }}
-          path: dist/*.zip
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}.zip

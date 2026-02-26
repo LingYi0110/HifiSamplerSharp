@@ -10,21 +10,18 @@ public sealed class HnSepModel : IHnSep, IDisposable
 {
     private readonly int _nFft;
     private readonly int _hopLength;
-    private readonly InferenceSession? _session;
+    private readonly InferenceSession _session;
 
     public HnSepModel(string modelPath, string device, int deviceId, int nFft, int hopLength)
     {
         _nFft = nFft;
         _hopLength = hopLength;
-        if (File.Exists(modelPath))
-        {
-            _session = OnnxUtils.CreateSession(modelPath, device, deviceId);
-        }
+        _session = OnnxUtils.CreateSession(modelPath, device, deviceId);
     }
 
     public float[] PredictFromAudio(float[] audio)
     {
-        if (_session is null || audio.Length == 0)
+        if (audio.Length == 0)
         {
             return audio.ToArray();
         }
@@ -103,6 +100,6 @@ public sealed class HnSepModel : IHnSep, IDisposable
 
     public void Dispose()
     {
-        _session?.Dispose();
+        _session.Dispose();
     }
 }

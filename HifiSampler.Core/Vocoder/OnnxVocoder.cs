@@ -5,7 +5,7 @@ namespace HifiSampler.Core.Vocoder;
 
 public sealed class OnnxVocoder : IVocoder, IDisposable
 {
-    private readonly InferenceSession? _session;
+    private readonly InferenceSession _session;
     private readonly int _numMels;
     private readonly int _hopSize;
 
@@ -13,10 +13,7 @@ public sealed class OnnxVocoder : IVocoder, IDisposable
     {
         _numMels = numMels;
         _hopSize = hopSize;
-        if (!string.IsNullOrWhiteSpace(modelPath) && File.Exists(modelPath))
-        {
-            _session = Utils.OnnxUtils.CreateSession(modelPath, device, deviceId);
-        }
+        _session = Utils.OnnxUtils.CreateSession(modelPath, device, deviceId);
     }
     
     public float[] SpecToWav(float[,] mel, float[] f0)
@@ -40,11 +37,6 @@ public sealed class OnnxVocoder : IVocoder, IDisposable
         // [1, time]
         var f0Tensor = new DenseTensor<float>(f0, new[] { 1, f0.Length });
         
-        if (_session is null)
-        {
-            return new float[Math.Max(1, timeFrames * _hopSize)];
-        }
-
         // Run inference
         var inputs = new List<NamedOnnxValue>
         {
@@ -60,6 +52,6 @@ public sealed class OnnxVocoder : IVocoder, IDisposable
     
     public void Dispose()
     {
-        _session?.Dispose();
+        _session.Dispose();
     }
 }
