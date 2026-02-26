@@ -58,23 +58,17 @@ internal static class Radix2Fft
         TransformCore(real, imag, n, plan, plan.TwiddleImagForward);
     }
 
-    private static void BitReversePermute(Span<float> real, Span<float> imag, int[] bitReversed)
+    private static void BitReversePermute(Span<float> real, Span<float> imag, ReadOnlySpan<int> bitReversed)
     {
-        for (var i = 0; i < bitReversed.Length; i++)
+        int n = bitReversed.Length;
+        for (int i = 0; i < n; i++)
         {
-            var j = bitReversed[i];
-            if (j <= i)
+            int j = bitReversed[i];
+            if (j > i)
             {
-                continue;
+                (real[i], real[j]) = (real[j], real[i]);
+                (imag[i], imag[j]) = (imag[j], imag[i]);
             }
-
-            var tempReal = real[i];
-            real[i] = real[j];
-            real[j] = tempReal;
-
-            var tempImag = imag[i];
-            imag[i] = imag[j];
-            imag[j] = tempImag;
         }
     }
 
