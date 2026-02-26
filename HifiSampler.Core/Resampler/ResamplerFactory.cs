@@ -1,5 +1,5 @@
 using HifiSampler.Core.HnSep;
-using HifiSampler.Core.Pipeline;
+using HifiSampler.Core.Resampler.Pipeline;
 using HifiSampler.Core.Utils;
 using HifiSampler.Core.Vocoder;
 

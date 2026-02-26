@@ -1,4 +1,4 @@
-namespace HifiSampler.Core.Pipeline;
+namespace HifiSampler.Core.Resampler.Pipeline;
 
 public static class TimeStretch
 {

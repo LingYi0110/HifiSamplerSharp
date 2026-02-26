@@ -1,5 +1,5 @@
 using HifiSampler.Core.Audio;
-using HifiSampler.Core.Pipeline;
+using HifiSampler.Core.Resampler.Pipeline;
 using HifiSampler.Core.Vocoder;
 
 namespace HifiSampler.Core.Resampler;
@@ -9,7 +9,7 @@ public sealed class Resampler(
     IVocoder vocoder,
     ResamplerConfig config)
 {
-    public async Task<ResampleResult> RenderAsync(
+    public async Task<ResamplerResult> RenderAsync(
         string inputFile,
         string outputFile,
         int pitchMidi,
@@ -34,7 +34,7 @@ public sealed class Resampler(
 
             if (string.Equals(outputFile, "nul", StringComparison.OrdinalIgnoreCase))
             {
-                return new ResampleResult(200, "Success: null output skipped.");
+                return new ResamplerResult(200, "Success: null output skipped.");
             }
 
             var thopOrigin = (double)config.OriginHopSize / config.SampleRate;
@@ -95,7 +95,7 @@ public sealed class Resampler(
             var cutR = Math.Min(wavCon.Length, (int)(newEnd * config.SampleRate));
             if (cutR <= cutL)
             {
-                return new ResampleResult(500, "Error processing: invalid render range.");
+                return new ResamplerResult(500, "Error processing: invalid render range.");
             }
 
             var render = wavCon[cutL..cutR];
@@ -141,15 +141,15 @@ public sealed class Resampler(
 
             _ = modulation; // parsed for parity, currently no-op by design.
             AudioIO.WriteWavMono(outputFile, render, config.SampleRate);
-            return new ResampleResult(200, $"Success: '{Path.GetFileNameWithoutExtension(inputFile)}' -> '{Path.GetFileName(outputFile)}'");
+            return new ResamplerResult(200, $"Success: '{Path.GetFileNameWithoutExtension(inputFile)}' -> '{Path.GetFileName(outputFile)}'");
         }
         catch (FileNotFoundException ex)
         {
-            return new ResampleResult(404, "Error processing: Input file not found.", ex.ToString());
+            return new ResamplerResult(404, "Error processing: Input file not found.", ex.ToString());
         }
         catch (Exception ex)
         {
-            return new ResampleResult(500, "Error processing: Internal error.", ex.ToString());
+            return new ResamplerResult(500, "Error processing: Internal error.", ex.ToString());
         }
     }
 

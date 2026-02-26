@@ -1,44 +1,37 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
-using System.Text;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace HifiSampler.Core.Resampler;
 
 public sealed class ResamplerCacheManager
 {
-    private const uint MelMagic = 0x314C454D; // MEL1
-    private const uint ScaleMagic = 0x314C4353; // SCL1
-    private const uint HnSepMagic = 0x31504E48; // HNP1
+    private const int IoBufferSize = 64 * 1024;
+    private const int MelHeaderBytes = sizeof(int) + sizeof(int) + sizeof(float);
+    private const int HnSepHeaderBytes = sizeof(int);
 
     public bool ShouldBypassCache(ResamplerFlags flags) => flags.G;
 
-    public async Task<(float[,] mel, float scale)?> TryLoadMelAsync(
+    public Task<(float[,] mel, float scale)?> TryLoadMelAsync(
         string inputFile,
         ResamplerFlags flags,
         CancellationToken cancellationToken = default)
     {
         var melPath = BuildMelCacheFilePath(inputFile, flags);
-        var scalePath = BuildScaleCacheFilePath(inputFile, flags);
-        if (!File.Exists(melPath) || !File.Exists(scalePath))
+        if (!File.Exists(melPath))
         {
-            return null;
+            return Task.FromResult<(float[,] mel, float scale)?>(null);
         }
 
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var mel = ReadMel(melPath);
-            var scale = ReadScale(scalePath);
-            if (mel is null || !scale.HasValue)
-            {
-                return null;
-            }
-
-            return (mel, scale.Value);
+            return Task.FromResult(ReadMel(melPath));
         }
         catch
         {
-            return null;
+            return Task.FromResult<(float[,] mel, float scale)?>(null);
         }
     }
 
@@ -55,7 +48,7 @@ public sealed class ResamplerCacheManager
 
         try
         {
-            return Task.FromResult<float[]?>(ReadHnSep(hnsepPath));
+            return Task.FromResult(ReadHnSep(hnsepPath));
         }
         catch
         {
@@ -71,11 +64,8 @@ public sealed class ResamplerCacheManager
     {
         cancellationToken.ThrowIfCancellationRequested();
         var melPath = BuildMelCacheFilePath(inputFile, flags);
-        var scalePath = BuildScaleCacheFilePath(inputFile, flags);
         EnsureDirectory(melPath);
-        EnsureDirectory(scalePath);
-        WriteMel(melPath, feature.mel);
-        WriteScale(scalePath, feature.scale);
+        WriteMel(melPath, feature.mel, feature.scale);
         return Task.CompletedTask;
     }
 
@@ -96,22 +86,14 @@ public sealed class ResamplerCacheManager
         var cacheDirectory = ResolveCacheDirectory(inputFile);
         var fileStem = Path.GetFileNameWithoutExtension(inputFile);
         var signature = BuildFeatureSignature(flags);
-        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.mel.bin");
-    }
-
-    private string BuildScaleCacheFilePath(string inputFile, ResamplerFlags flags)
-    {
-        var cacheDirectory = ResolveCacheDirectory(inputFile);
-        var fileStem = Path.GetFileNameWithoutExtension(inputFile);
-        var signature = BuildFeatureSignature(flags);
-        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.scale.bin");
+        return Path.Combine(cacheDirectory, $"{fileStem}_{signature}.mel.cache");
     }
 
     private string BuildHnSepCacheFilePath(string inputFile)
     {
         var cacheDirectory = ResolveCacheDirectory(inputFile);
         var fileStem = Path.GetFileNameWithoutExtension(inputFile);
-        return Path.Combine(cacheDirectory, $"{fileStem}.hnsep.bin");
+        return Path.Combine(cacheDirectory, $"{fileStem}.hnsep.cache");
     }
 
     private static string ResolveCacheDirectory(string inputFile)
@@ -138,62 +120,64 @@ public sealed class ResamplerCacheManager
         return Convert.ToHexString(hash.AsSpan(0, 6)).ToLowerInvariant();
     }
 
-    private static float[,]? ReadMel(string path)
+    private static (float[,] mel, float scale)? ReadMel(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
-        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
-        if (reader.ReadUInt32() != MelMagic)
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, IoBufferSize, FileOptions.SequentialScan);
+        if (stream.Length < MelHeaderBytes)
         {
             return null;
         }
 
-        var rows = reader.ReadInt32();
-        var cols = reader.ReadInt32();
+        Span<byte> header = stackalloc byte[MelHeaderBytes];
+        stream.ReadExactly(header);
+
+        var rows = BinaryPrimitives.ReadInt32LittleEndian(header[..sizeof(int)]);
+        var cols = BinaryPrimitives.ReadInt32LittleEndian(header.Slice(sizeof(int), sizeof(int)));
         if (rows <= 0 || cols <= 0)
         {
             return null;
         }
 
-        var flat = new float[rows * cols];
-        stream.ReadExactly(MemoryMarshal.AsBytes(flat.AsSpan()));
-        var mel = new float[rows, cols];
-        var offset = 0;
-        for (var row = 0; row < rows; row++)
-        {
-            for (var col = 0; col < cols; col++)
-            {
-                mel[row, col] = flat[offset++];
-            }
-        }
-
-        return mel;
-    }
-
-    private static float? ReadScale(string path)
-    {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
-        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
-        if (reader.ReadUInt32() != ScaleMagic)
+        if (!TryGetElementCount(rows, cols, out var elementCount))
         {
             return null;
         }
 
-        return reader.ReadSingle();
+        var expectedLength = MelHeaderBytes + (long)elementCount * sizeof(float);
+        if (stream.Length != expectedLength)
+        {
+            return null;
+        }
+
+        var scaleBits = BinaryPrimitives.ReadInt32LittleEndian(header.Slice(sizeof(int) * 2, sizeof(float)));
+        var scale = BitConverter.Int32BitsToSingle(scaleBits);
+        var mel = new float[rows, cols];
+        stream.ReadExactly(MemoryMarshal.AsBytes(GetMatrixSpan(mel)));
+
+        return (mel, scale);
     }
 
     private static float[]? ReadHnSep(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: false);
-        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
-        if (reader.ReadUInt32() != HnSepMagic)
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, IoBufferSize, FileOptions.SequentialScan);
+        if (stream.Length < HnSepHeaderBytes)
         {
             return null;
         }
 
-        var length = reader.ReadInt32();
+        Span<byte> header = stackalloc byte[HnSepHeaderBytes];
+        stream.ReadExactly(header);
+
+        var length = BinaryPrimitives.ReadInt32LittleEndian(header);
         if (length <= 0)
         {
             return [];
+        }
+
+        var expectedLength = HnSepHeaderBytes + (long)length * sizeof(float);
+        if (stream.Length != expectedLength)
+        {
+            return null;
         }
 
         var result = new float[length];
@@ -201,45 +185,96 @@ public sealed class ResamplerCacheManager
         return result;
     }
 
-    private static void WriteMel(string path, float[,] mel)
+    private static void WriteMel(string path, float[,] mel, float scale)
     {
         var rows = mel.GetLength(0);
         var cols = mel.GetLength(1);
-        var flat = new float[rows * cols];
-        var offset = 0;
-        for (var row = 0; row < rows; row++)
+        if (!TryGetElementCount(rows, cols, out _))
         {
-            for (var col = 0; col < cols; col++)
-            {
-                flat[offset++] = mel[row, col];
-            }
+            throw new InvalidDataException("Mel shape is invalid for cache serialization.");
         }
 
-        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
-        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
-        writer.Write(MelMagic);
-        writer.Write(rows);
-        writer.Write(cols);
-        writer.Flush();
-        stream.Write(MemoryMarshal.AsBytes(flat.AsSpan()));
+        var header = new byte[MelHeaderBytes];
+        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(0, sizeof(int)), rows);
+        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(sizeof(int), sizeof(int)), cols);
+        BinaryPrimitives.WriteInt32LittleEndian(
+            header.AsSpan(sizeof(int) * 2, sizeof(float)),
+            BitConverter.SingleToInt32Bits(scale));
+
+        WriteAtomically(path, stream =>
+        {
+            stream.Write(header);
+            stream.Write(MemoryMarshal.AsBytes(GetMatrixSpan(mel)));
+        });
     }
 
-    private static void WriteScale(string path, float scale)
+    private static void WriteHnSep(string path, float[] values)
     {
-        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
-        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
-        writer.Write(ScaleMagic);
-        writer.Write(scale);
-        writer.Flush();
+        var header = new byte[HnSepHeaderBytes];
+        BinaryPrimitives.WriteInt32LittleEndian(header, values.Length);
+
+        WriteAtomically(path, stream =>
+        {
+            stream.Write(header);
+            stream.Write(MemoryMarshal.AsBytes(values.AsSpan()));
+        });
     }
 
-    private static void WriteHnSep(string path, ReadOnlySpan<float> values)
+    private static bool TryGetElementCount(int rows, int cols, out int count)
     {
-        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: false);
-        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
-        writer.Write(HnSepMagic);
-        writer.Write(values.Length);
-        writer.Flush();
-        stream.Write(MemoryMarshal.AsBytes(values));
+        var total = (long)rows * cols;
+        if (total <= 0 || total > int.MaxValue)
+        {
+            count = 0;
+            return false;
+        }
+
+        count = (int)total;
+        return true;
+    }
+
+    private static Span<float> GetMatrixSpan(float[,] matrix)
+    {
+        if (matrix.Length == 0)
+        {
+            return [];
+        }
+
+        return MemoryMarshal.CreateSpan(ref matrix[0, 0], matrix.Length);
+    }
+
+    private static void WriteAtomically(string path, Action<FileStream> write)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            directory = Directory.GetCurrentDirectory();
+        }
+
+        var tempPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, IoBufferSize, FileOptions.None))
+            {
+                write(stream);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(tempPath, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch
+            {
+                // Best effort cleanup.
+            }
+        }
     }
 }

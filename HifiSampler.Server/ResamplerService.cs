@@ -24,7 +24,7 @@ public sealed class ResamplerService : IDisposable
 
     public bool IsReady { get; }
 
-    public async Task<ResampleResult> RenderAsync(
+    public async Task<ResamplerResult> RenderAsync(
         ResamplerRequestDto request,
         CancellationToken cancellationToken = default)
     {

@@ -1,7 +1,6 @@
-using HifiSampler.Core.Resampler;
 using HifiSampler.Core.Utils;
 
-namespace HifiSampler.Core.Pipeline;
+namespace HifiSampler.Core.Resampler.Pipeline;
 
 public static class PitchCurve
 {

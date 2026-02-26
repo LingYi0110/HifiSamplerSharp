@@ -1,9 +1,10 @@
 using HifiSampler.Core.Audio;
 using HifiSampler.Core.HnSep;
-using HifiSampler.Core.Resampler;
+using HifiSampler.Core.Stft;
 using HifiSampler.Core.Utils;
+using System.Numerics;
 
-namespace HifiSampler.Core.Pipeline;
+namespace HifiSampler.Core.Resampler.Pipeline;
 
 public sealed class FeatureExtract(
     ResamplerCacheManager cacheManager,
@@ -88,7 +89,7 @@ public sealed class FeatureExtract(
         return separated;
     }
 
-    private static float[] ApplyHnSepFlags(float[] original, float[] separated, ResamplerFlags flags)
+    private float[] ApplyHnSepFlags(float[] original, float[] separated, ResamplerFlags flags)
     {
         var length = Math.Min(original.Length, separated.Length);
         if (length <= 0)
@@ -130,23 +131,108 @@ public sealed class FeatureExtract(
         return result;
     }
 
-    private static float[] PreEmphasisBaseTension(float[] input, float tension)
+    private float[] PreEmphasisBaseTension(float[] wave, float b)
     {
-        // Lightweight approximation: match Python behavior directionally without heavy STFT dependency.
-        var result = new float[input.Length];
-        var lowBlend = Math.Clamp(tension / 2f, -1f, 1f);
-        float prev = 0f;
-        for (var i = 0; i < input.Length; i++)
+        if (wave.Length == 0)
         {
-            var high = input[i] - 0.95f * prev;
-            prev = input[i];
-            result[i] = input[i] + lowBlend * high;
+            return [];
         }
 
+        var originalLength = wave.Length;
+        var hopSize = Math.Max(1, config.HopSize);
+        var padLength = (hopSize - (originalLength % hopSize)) % hopSize;
+        var paddedLength = originalLength + padLength;
+        var paddedWave = new float[paddedLength];
+        Array.Copy(wave, paddedWave, originalLength);
+
+        var nFft = Math.Max(2, config.NFft);
+        var winSize = Math.Clamp(config.WinSize, 1, nFft);
+        var window = StftEngine.BuildHannWindow(winSize);
+        var spectrum = StftEngine.Stft(
+            paddedWave,
+            nFft,
+            hopSize,
+            winSize,
+            window,
+            center: true);
+
+        var bins = spectrum.GetLength(0);
+        var frames = spectrum.GetLength(1);
+        var sampleRateHalf = Math.Max(1f, config.SampleRate / 2f);
+        var x0 = bins / (sampleRateHalf / 1500f);
+        if (x0 <= 0f)
+        {
+            x0 = 1f;
+        }
+
+        const float epsilon = 1e-9f;
+        for (var bin = 0; bin < bins; bin++)
+        {
+            var freqFilter = (-b / x0) * bin + b;
+            var gainDb = Math.Clamp(freqFilter, -2f, 2f);
+            var gainScale = MathF.Exp(gainDb);
+
+            for (var frame = 0; frame < frames; frame++)
+            {
+                var sample = spectrum[bin, frame];
+                var real = (float)sample.Real;
+                var imag = (float)sample.Imaginary;
+                var amp = MathF.Sqrt(real * real + imag * imag);
+                var adjustedAmp = MathF.Max(epsilon, amp) * gainScale;
+
+                if (amp > epsilon)
+                {
+                    var scale = adjustedAmp / amp;
+                    spectrum[bin, frame] = new Complex(real * scale, imag * scale);
+                }
+                else
+                {
+                    spectrum[bin, frame] = new Complex(adjustedAmp, 0f);
+                }
+            }
+        }
+
+        var filteredWave = StftEngine.Istft(
+            spectrum,
+            nFft,
+            hopSize,
+            winSize,
+            window,
+            center: true,
+            expectedLength: paddedLength);
+
+        var originalMax = 0f;
+        for (var i = 0; i < paddedWave.Length; i++)
+        {
+            originalMax = MathF.Max(originalMax, MathF.Abs(paddedWave[i]));
+        }
+
+        var filteredMax = 0f;
+        for (var i = 0; i < filteredWave.Length; i++)
+        {
+            filteredMax = MathF.Max(filteredMax, MathF.Abs(filteredWave[i]));
+        }
+
+        var tensionBoost = Math.Clamp(b / -15f, 0f, 0.33f) + 1f;
+        var normalization = originalMax > epsilon && filteredMax > epsilon
+            ? (originalMax / filteredMax) * tensionBoost
+            : 0f;
+        for (var i = 0; i < filteredWave.Length; i++)
+        {
+            filteredWave[i] *= normalization;
+        }
+
+        if (filteredWave.Length == originalLength)
+        {
+            return filteredWave;
+        }
+
+        var result = new float[originalLength];
+        Array.Copy(filteredWave, result, Math.Min(originalLength, filteredWave.Length));
         return result;
     }
 
-    private static float[] ApplySimpleScaling(float[] wave, int breath)
+    private float[] ApplySimpleScaling(float[] wave, int breath)
     {
         var scale = Math.Clamp(breath, 0, 500) / 100f;
         var result = new float[wave.Length];
@@ -158,7 +244,7 @@ public sealed class FeatureExtract(
         return result;
     }
 
-    private static void ApplyDynamicRangeCompressionInPlace(float[,] mel)
+    private void ApplyDynamicRangeCompressionInPlace(float[,] mel)
     {
         const float epsilon = 1e-9f;
         var rows = mel.GetLength(0);
@@ -172,6 +258,6 @@ public sealed class FeatureExtract(
         }
     }
 
-    private static bool NeedHnSepSeparation(ResamplerFlags flags) =>
+    private bool NeedHnSepSeparation(ResamplerFlags flags) =>
         flags.Ht != 0 || flags.Hb != flags.Hv;
 }
