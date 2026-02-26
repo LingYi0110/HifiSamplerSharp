@@ -8,6 +8,8 @@
     <IsAotCompatible>true</IsAotCompatible>
     <OnnxRuntimeBackend Condition="'$(OnnxRuntimeBackend)' == ''">cpu</OnnxRuntimeBackend>
     <OnnxRuntimeVersion>1.24.2</OnnxRuntimeVersion>
+    <IsHostMacOS>$([MSBuild]::IsOSPlatform('OSX'))</IsHostMacOS>
+    <IsHostWindows>$([MSBuild]::IsOSPlatform('WINDOWS'))</IsHostWindows>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -43,9 +45,9 @@
   <Target Name="ValidateOnnxRuntimeBackend" BeforeTargets="Restore;Build">
     <Error Condition="'$(OnnxRuntimeBackend)' != 'cpu' And '$(OnnxRuntimeBackend)' != 'gpu' And '$(OnnxRuntimeBackend)' != 'cuda' And '$(OnnxRuntimeBackend)' != 'dml'"
            Text="Invalid OnnxRuntimeBackend='$(OnnxRuntimeBackend)'. Supported values: cpu, gpu (or cuda), dml." />
-    <Error Condition="('$(OnnxRuntimeBackend)' == 'gpu' Or '$(OnnxRuntimeBackend)' == 'cuda') And '$([MSBuild]::IsOSPlatform('OSX'))' == 'true'"
+    <Error Condition="('$(OnnxRuntimeBackend)' == 'gpu' Or '$(OnnxRuntimeBackend)' == 'cuda') And '$(IsHostMacOS)' == 'True'"
            Text="OnnxRuntimeBackend='$(OnnxRuntimeBackend)' is not supported on macOS. Use cpu instead." />
-    <Error Condition="'$(OnnxRuntimeBackend)' == 'dml' And '$([MSBuild]::IsOSPlatform('WINDOWS'))' != 'true'"
+    <Error Condition="'$(OnnxRuntimeBackend)' == 'dml' And '$(IsHostWindows)' != 'True'"
            Text="OnnxRuntimeBackend='dml' is only supported on Windows." />
   </Target>
 
