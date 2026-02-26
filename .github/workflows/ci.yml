@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: true
+
+      - name: Publish Server
+        run: >
+          dotnet publish HifiSampler.Server/HifiSampler.Server.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          -o out/server/${{ matrix.rid }}
+
+      - name: Publish Client
+        run: >
+          dotnet publish HifiSampler.Client/HifiSampler.Client.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          -o out/client/${{ matrix.rid }}
+
+      - name: Pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "out\server\${{ matrix.rid }}\*" -DestinationPath "dist\server-${{ matrix.rid }}.zip"
+          Compress-Archive -Path "out\client\${{ matrix.rid }}\*" -DestinationPath "dist\client-${{ matrix.rid }}.zip"
+
+      - name: Pack (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cd out
+          (cd server/${{ matrix.rid }} && zip -r ../../../dist/server-${{ matrix.rid }}.zip .)
+          (cd client/${{ matrix.rid }} && zip -r ../../../dist/client-${{ matrix.rid }}.zip .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.rid }}
+          path: dist/*.zip
